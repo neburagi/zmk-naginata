@@ -457,6 +457,33 @@ int number_of_candidates(NGList *keys) {
   return result;
 }
 
+static bool nglist_contains_key(const NGList *keys, uint32_t keycode) {
+    for (int i = 0; i < keys->size; i++) {
+        if (keys->elements[i] == keycode) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool has_space_shift_match(const NGList *keys) {
+    if (keys->size == 0 || keys->size >= 3) {
+        return false;
+    }
+    if (nglist_contains_key(keys, SPACE)) {
+        return false;
+    }
+
+    NGList shifted;
+    initializeList(&shifted);
+    addToList(&shifted, SPACE);
+    for (int i = 0; i < keys->size; i++) {
+        addToList(&shifted, keys->elements[i]);
+    }
+
+    return number_of_matches(&shifted) > 0;
+}
+
 // キー入力を文字に変換して出力する
 void ng_type(NGList *keys) {
     LOG_DBG(">NAGINATA NG_TYPE");
@@ -536,7 +563,32 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
         n_pressed_keys++;
         pressed_keys |= ng_key[keycode - A]; // キーの重ね合わせ
 
-        if (keycode == SPACE || keycode == ENTER) {
+        if (keycode == SPACE) {
+            bool combined = false;
+            if (nginput.size > 0) {
+                NGList last;
+                copyList(&(nginput.elements[nginput.size - 1]), &last);
+                if (last.size > 0 && last.size < 3 && !nglist_contains_key(&last, SPACE)) {
+                    NGList shifted;
+                    initializeList(&shifted);
+                    addToList(&shifted, SPACE);
+                    for (int i = 0; i < last.size; i++) {
+                        addToList(&shifted, last.elements[i]);
+                    }
+                    if (number_of_matches(&shifted) > 0) {
+                        removeFromListArrayAt(&nginput, nginput.size - 1);
+                        addToListArray(&nginput, &shifted);
+                        combined = true;
+                    }
+                }
+            }
+            if (!combined) {
+                NGList a;
+                initializeList(&a);
+                addToList(&a, keycode);
+                addToListArray(&nginput, &a);
+            }
+        } else if (keycode == ENTER) {
             NGList a;
             initializeList(&a);
             addToList(&a, keycode);
@@ -599,7 +651,13 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
             }
         }
 
-        if (nginput.size > 1 || number_of_candidates(&(nginput.elements[0])) == 1) {
+        bool defer_for_space_shift = false;
+        if ((pressed_keys & B_SPACE) == 0 && nginput.size > 0) {
+            defer_for_space_shift = has_space_shift_match(&(nginput.elements[0]));
+        }
+
+        if (!defer_for_space_shift &&
+            (nginput.size > 1 || number_of_candidates(&(nginput.elements[0])) == 1)) {
             ng_type(&(nginput.elements[0]));
             removeFromListArrayAt(&nginput, 0);
         }
