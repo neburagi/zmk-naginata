@@ -1,0 +1,15 @@
+/*
+ * Copyright (c) 2024 The ZMK Contributors
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/ {
+    behaviors {
+        /omit-if-no-ref/ mod_until_layer: mod_until_layer {
+            compatible = "zmk,behavior-mod-until-layer";
+            label = "MOD_UNTIL_LAYER";
+            #binding-cells = <2>;
+        };
+    };
+};

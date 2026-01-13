@@ -1,3 +1,7 @@
 config NAGINATA
     bool "Enable Naginata"
     default y
+
+config ZMK_BEHAVIOR_MOD_UNTIL_LAYER
+    bool "Enable mod-until-layer behavior"
+    default y
