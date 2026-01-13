@@ -69,7 +69,7 @@ extern int64_t timestamp;
 static NGListArray nginput;
 static uint32_t pressed_keys = 0UL; // 押しているキーのビットをたてる
 static int8_t n_pressed_keys = 0;   // 押しているキーの数
-static uint32_t bypass_keys = 0UL;
+static uint64_t bypass_keys = 0ULL;
 
 #define NG_WINDOWS 0
 #define NG_MACOS 1
@@ -82,24 +82,26 @@ typedef union {
     bool tategaki : true; // true: 縦書き, false: 横書き
 } user_config_t;
 
-static uint32_t bypass_bit(uint32_t keycode) {
+static uint64_t bypass_bit(uint32_t keycode) {
     switch (keycode) {
     case A ... Z:
-        return 1UL << (keycode - A);
+        return 1ULL << (keycode - A);
     case SPACE:
-        return 1UL << 26;
+        return 1ULL << 26;
     case ENTER:
-        return 1UL << 27;
+        return 1ULL << 27;
+    case BACKSPACE:
+        return 1ULL << 32;
     case DOT:
-        return 1UL << 28;
+        return 1ULL << 28;
     case COMMA:
-        return 1UL << 29;
+        return 1ULL << 29;
     case SLASH:
-        return 1UL << 30;
+        return 1ULL << 30;
     case SEMI:
-        return 1UL << 31;
+        return 1ULL << 31;
     default:
-        return 0UL;
+        return 0ULL;
     }
 }
 
@@ -115,6 +117,23 @@ static const uint32_t ng_key[] = {
     [Y - A] = B_Y,     [Z - A] = B_Z,         [SEMI - A] = B_SEMI,   [COMMA - A] = B_COMMA,
     [DOT - A] = B_DOT, [SLASH - A] = B_SLASH, [SPACE - A] = B_SPACE, [ENTER - A] = B_SPACE,
 };
+
+static uint32_t ng_keycode_to_bit(uint32_t keycode) {
+    switch (keycode) {
+    case A ... Z:
+    case SEMI:
+    case COMMA:
+    case DOT:
+    case SLASH:
+    case SPACE:
+    case ENTER:
+        return ng_key[keycode - A];
+    case BACKSPACE:
+        return B_SPACE;
+    default:
+        return 0UL;
+    }
+}
 
 // カナ変換テーブル
 typedef struct {
@@ -380,20 +399,24 @@ static int count_kana_entries(NGList *keys, bool exact_match) {
 
   int count = 0;
   uint32_t keyset0 = 0UL, keyset1 = 0UL, keyset2 = 0UL;
+  uint32_t keyset_all = 0UL;
   
   // keysetを配列にしたらバイナリサイズが増えた
   switch (keys->size) {
     case 1:
-      keyset0 = ng_key[keys->elements[0] - A];
+      keyset0 = ng_keycode_to_bit(keys->elements[0]);
+      keyset_all = keyset0;
       break;
     case 2:
-      keyset0 = ng_key[keys->elements[0] - A];
-      keyset1 = ng_key[keys->elements[1] - A];
+      keyset0 = ng_keycode_to_bit(keys->elements[0]);
+      keyset1 = ng_keycode_to_bit(keys->elements[1]);
+      keyset_all = keyset0 | keyset1;
       break;
     default:
-      keyset0 = ng_key[keys->elements[0] - A];
-      keyset1 = ng_key[keys->elements[1] - A];
-      keyset2 = ng_key[keys->elements[2] - A];
+      keyset0 = ng_keycode_to_bit(keys->elements[0]);
+      keyset1 = ng_keycode_to_bit(keys->elements[1]);
+      keyset2 = ng_keycode_to_bit(keys->elements[2]);
+      keyset_all = keyset0 | keyset1 | keyset2;
       break;
   }
 
@@ -412,28 +435,20 @@ static int count_kana_entries(NGList *keys, bool exact_match) {
         break;
       case 2:
         if (exact_match) {
-          matches = (ngdickana[i].shift == (keyset0 | keyset1)) ||
-                   (ngdickana[i].shift == keyset0 && ngdickana[i].douji == keyset1) ||
-                   (ngdickana[i].shift == 0UL && ngdickana[i].douji == (keyset0 | keyset1));
+          matches = ((ngdickana[i].shift | ngdickana[i].douji) == keyset_all);
         } else {
-          matches = (ngdickana[i].shift == (keyset0 | keyset1)) ||
-                   (ngdickana[i].shift == keyset0 && (ngdickana[i].douji & keyset1) == keyset1) ||
-                   (ngdickana[i].shift == 0UL && (ngdickana[i].douji & (keyset0 | keyset1)) == (keyset0 | keyset1));
+          matches = (((ngdickana[i].shift | ngdickana[i].douji) & keyset_all) == keyset_all);
           // しぇ、ちぇ、など2キーで確定してはいけない
-          if (matches && (ngdickana[i].shift | ngdickana[i].douji) != (keyset0 | keyset1)) {
+          if (matches && (ngdickana[i].shift | ngdickana[i].douji) != keyset_all) {
             count = 2;
           }
         }
         break;
       default:
         if (exact_match) {
-          matches = (ngdickana[i].shift == (keyset0 | keyset1) && ngdickana[i].douji == keyset2) ||
-                   (ngdickana[i].shift == keyset0 && ngdickana[i].douji == (keyset1 | keyset2)) ||
-                   (ngdickana[i].shift == 0UL && ngdickana[i].douji == (keyset0 | keyset1 | keyset2));
+          matches = ((ngdickana[i].shift | ngdickana[i].douji) == keyset_all);
         } else {
-          matches = (ngdickana[i].shift == (keyset0 | keyset1) && (ngdickana[i].douji & keyset2) == keyset2) ||
-                   (ngdickana[i].shift == keyset0 && (ngdickana[i].douji & (keyset1 | keyset2)) == (keyset1 | keyset2)) ||
-                   (ngdickana[i].shift == 0UL && (ngdickana[i].douji & (keyset0 | keyset1 | keyset2)) == (keyset0 | keyset1 | keyset2));
+          matches = (((ngdickana[i].shift | ngdickana[i].douji) & keyset_all) == keyset_all);
         }
         break;
     }
@@ -466,11 +481,15 @@ static bool nglist_contains_key(const NGList *keys, uint32_t keycode) {
     return false;
 }
 
+static bool nglist_contains_shift_key(const NGList *keys) {
+    return nglist_contains_key(keys, SPACE) || nglist_contains_key(keys, BACKSPACE);
+}
+
 static bool has_space_shift_match(const NGList *keys) {
     if (keys->size == 0 || keys->size >= 3) {
         return false;
     }
-    if (nglist_contains_key(keys, SPACE)) {
+    if (nglist_contains_shift_key(keys)) {
         return false;
     }
 
@@ -497,10 +516,16 @@ void ng_type(NGList *keys) {
         raise_zmk_keycode_state_changed_from_encoded(ENTER, false, timestamp);
         return;
     }
+    if (keys->size == 1 && keys->elements[0] == BACKSPACE) {
+        LOG_DBG(" NAGINATA type keycode 0x%02X", BACKSPACE);
+        raise_zmk_keycode_state_changed_from_encoded(BACKSPACE, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(BACKSPACE, false, timestamp);
+        return;
+    }
 
     uint32_t keyset = 0UL;
     for (int i = 0; i < keys->size; i++) {
-        keyset |= ng_key[keys->elements[i] - A];
+        keyset |= ng_keycode_to_bit(keys->elements[i]);
     }
 
     for (int i = 0; i < sizeof ngdickana / sizeof ngdickana[0]; i++) {
@@ -547,13 +572,14 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
     switch (keycode) {
     case A ... Z:
     case SPACE:
+    case BACKSPACE:
     case ENTER:
     case DOT:
     case COMMA:
     case SLASH:
     case SEMI:
         if (zmk_hid_get_explicit_mods()) {
-            uint32_t bit = bypass_bit(keycode);
+            uint64_t bit = bypass_bit(keycode);
             if (bit) {
                 bypass_keys |= bit;
             }
@@ -561,17 +587,17 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
             return true;
         }
         n_pressed_keys++;
-        pressed_keys |= ng_key[keycode - A]; // キーの重ね合わせ
+        pressed_keys |= ng_keycode_to_bit(keycode); // キーの重ね合わせ
 
-        if (keycode == SPACE) {
+        if (keycode == SPACE || keycode == BACKSPACE) {
             bool combined = false;
             if (nginput.size > 0) {
                 NGList last;
                 copyList(&(nginput.elements[nginput.size - 1]), &last);
-                if (last.size > 0 && last.size < 3 && !nglist_contains_key(&last, SPACE)) {
+                if (last.size > 0 && last.size < 3 && !nglist_contains_shift_key(&last)) {
                     NGList shifted;
                     initializeList(&shifted);
-                    addToList(&shifted, SPACE);
+                    addToList(&shifted, keycode);
                     for (int i = 0; i < last.size; i++) {
                         addToList(&shifted, last.elements[i]);
                     }
@@ -624,7 +650,7 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
 
         uint32_t keyset = 0UL;
         for (int i = 0; i < nginput.elements[0].size; i++) {
-            keyset |= ng_key[nginput.elements[0].elements[i] - A];
+            keyset |= ng_keycode_to_bit(nginput.elements[0].elements[i]);
         }
         for (int i = 0; i < 10; i++) {
             NGList rskc;
@@ -637,7 +663,7 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
             int c = includeList(&rskc, keycode);
             uint32_t brs = 0UL;
             for (int j = 0; j < rskc.size; j++) {
-                brs |= ng_key[rskc.elements[j] - A];
+                brs |= ng_keycode_to_bit(rskc.elements[j]);
             }
 
             NGList l = nginput.elements[nginput.size - 1];
@@ -678,13 +704,14 @@ bool naginata_release(struct zmk_behavior_binding *binding,
     switch (keycode) {
     case A ... Z:
     case SPACE:
+    case BACKSPACE:
     case ENTER:
     case DOT:
     case COMMA:
     case SLASH:
     case SEMI:
         {
-            uint32_t bit = bypass_bit(keycode);
+            uint64_t bit = bypass_bit(keycode);
             if (bit && (bypass_keys & bit)) {
                 bypass_keys &= ~bit;
                 raise_zmk_keycode_state_changed_from_encoded(keycode, false, timestamp);
@@ -696,7 +723,7 @@ bool naginata_release(struct zmk_behavior_binding *binding,
         if (n_pressed_keys == 0)
             pressed_keys = 0UL;
 
-        pressed_keys &= ~ng_key[keycode - A]; // キーの重ね合わせ
+        pressed_keys &= ~ng_keycode_to_bit(keycode); // キーの重ね合わせ
 
         if (pressed_keys == 0UL) {
             while (nginput.size > 0) {
