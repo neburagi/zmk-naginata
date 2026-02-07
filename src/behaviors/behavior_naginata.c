@@ -544,6 +544,7 @@ void ng_type(NGList *keys) {
         LOG_DBG(" NAGINATA type keycode 0x%02X", ENTER);
         raise_zmk_keycode_state_changed_from_encoded(ENTER, true, timestamp);
         raise_zmk_keycode_state_changed_from_encoded(ENTER, false, timestamp);
+        ng_post_enter_maybe_move_right();
         return;
     }
     if (keys->size == 1 && keys->elements[0] == BACKSPACE) {
@@ -759,7 +760,7 @@ static int behavior_naginata_init(const struct device *dev) {
     initializeListArray(&nginput);
     pressed_keys = 0UL;
     n_pressed_keys = 0;
-    naginata_config.os =  NG_MACOS;
+    naginata_config.os =  NG_WINDOWS;
 
     return 0;
 };

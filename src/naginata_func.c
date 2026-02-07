@@ -43,6 +43,73 @@ void naginata_on(void)
 
 void nofunc() {}
 
+static bool move_right_after_next_enter = false;
+
+void ng_schedule_move_right_after_next_enter(void)
+{
+    move_right_after_next_enter = true;
+}
+
+void ng_post_enter_maybe_move_right(void)
+{
+    if (!move_right_after_next_enter) {
+        return;
+    }
+    move_right_after_next_enter = false;
+    raise_zmk_keycode_state_changed_from_encoded(RIGHT, true, timestamp);
+    raise_zmk_keycode_state_changed_from_encoded(RIGHT, false, timestamp);
+}
+
+static void input_windows_hex_keycode(int keycode)
+{
+    switch (keycode) {
+    case N0:
+        raise_zmk_keycode_state_changed_from_encoded(KP_N0, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(KP_N0, false, timestamp);
+        break;
+    case N1:
+        raise_zmk_keycode_state_changed_from_encoded(KP_N1, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(KP_N1, false, timestamp);
+        break;
+    case N2:
+        raise_zmk_keycode_state_changed_from_encoded(KP_N2, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(KP_N2, false, timestamp);
+        break;
+    case N3:
+        raise_zmk_keycode_state_changed_from_encoded(KP_N3, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(KP_N3, false, timestamp);
+        break;
+    case N4:
+        raise_zmk_keycode_state_changed_from_encoded(KP_N4, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(KP_N4, false, timestamp);
+        break;
+    case N5:
+        raise_zmk_keycode_state_changed_from_encoded(KP_N5, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(KP_N5, false, timestamp);
+        break;
+    case N6:
+        raise_zmk_keycode_state_changed_from_encoded(KP_N6, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(KP_N6, false, timestamp);
+        break;
+    case N7:
+        raise_zmk_keycode_state_changed_from_encoded(KP_N7, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(KP_N7, false, timestamp);
+        break;
+    case N8:
+        raise_zmk_keycode_state_changed_from_encoded(KP_N8, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(KP_N8, false, timestamp);
+        break;
+    case N9:
+        raise_zmk_keycode_state_changed_from_encoded(KP_N9, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(KP_N9, false, timestamp);
+        break;
+    default:
+        raise_zmk_keycode_state_changed_from_encoded(keycode, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(keycode, false, timestamp);
+        break;
+    }
+}
+
 void switch_to_hex_input()
 {
     switch (naginata_config.os)
@@ -89,11 +156,12 @@ void press_compose_key()
         k_sleep(K_MSEC(50));
         return;
     case NG_WINDOWS:
+        // Windows Unicode Hex Input: hold Alt, tap keypad '+', type hex, then release Alt.
+        // Avoid an isolated Alt-only event, which can trigger app UI accelerators.
         raise_zmk_keycode_state_changed_from_encoded(RIGHT_ALT, true, timestamp);
-        raise_zmk_keycode_state_changed_from_encoded(RIGHT_ALT, false, timestamp);
-        raise_zmk_keycode_state_changed_from_encoded(U, true, timestamp);
-        raise_zmk_keycode_state_changed_from_encoded(U, false, timestamp);
-        k_sleep(K_MSEC(50));
+        raise_zmk_keycode_state_changed_from_encoded(KP_PLUS, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(KP_PLUS, false, timestamp);
+        k_sleep(K_MSEC(10));
         return;
     case NG_LINUX:
         raise_zmk_keycode_state_changed_from_encoded(LC(LS(U)), true, timestamp);
@@ -113,9 +181,7 @@ void release_compose_key()
         k_sleep(K_MSEC(50));
         return;
     case NG_WINDOWS:
-        raise_zmk_keycode_state_changed_from_encoded(ENTER, true, timestamp);
-        raise_zmk_keycode_state_changed_from_encoded(ENTER, false, timestamp);
-        k_sleep(K_MSEC(50));
+        raise_zmk_keycode_state_changed_from_encoded(RIGHT_ALT, false, timestamp);
         return;
     case NG_LINUX:
         raise_zmk_keycode_state_changed_from_encoded(LC(LS(U)), true, timestamp);
@@ -149,6 +215,18 @@ void input_unicode_hex(int n1, int n2, int n3, int n4)
         return_to_kana_input();
         return;
     case NG_WINDOWS:
+        press_compose_key();
+        input_windows_hex_keycode(n1);
+        k_sleep(K_MSEC(10));
+        input_windows_hex_keycode(n2);
+        k_sleep(K_MSEC(10));
+        input_windows_hex_keycode(n3);
+        k_sleep(K_MSEC(10));
+        input_windows_hex_keycode(n4);
+        k_sleep(K_MSEC(10));
+        release_compose_key();
+        return_to_kana_input();
+        return;
     case NG_LINUX:
         press_compose_key();
         raise_zmk_keycode_state_changed_from_encoded(n1, true, timestamp);
@@ -195,6 +273,13 @@ void ngh_JKQ()
 
 void ngh_JKW()
 { // ／{改行}
+    if (naginata_config.os == NG_WINDOWS) {
+        input_unicode_hex(N3, N0, N0, E); // 『
+        input_unicode_hex(N3, N0, N0, F); // 』
+        ng_schedule_move_right_after_next_enter();
+        ng_prev_char();
+        return;
+    }
     input_unicode_hex(F, F, N0, F);
 }
 
@@ -227,6 +312,19 @@ void ngh_JKA()
 
 void ngh_JKS()
 { // 『{改行}
+    if (naginata_config.os == NG_WINDOWS) {
+        // Windowsでは通常キーで（）を入力
+        raise_zmk_keycode_state_changed_from_encoded(LS(N9), true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(LS(N9), false, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(LS(N0), true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(LS(N0), false, timestamp);
+        // IMEの未確定を確定
+        raise_zmk_keycode_state_changed_from_encoded(ENTER, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(ENTER, false, timestamp);
+        ng_schedule_move_right_after_next_enter();
+        ng_prev_char();
+        return;
+    }
     input_unicode_hex(N3, N0, N0, E);
 }
 
@@ -240,11 +338,31 @@ void ngh_JKD()
 
 void ngh_JKF()
 { // 「{改行}
+    if (naginata_config.os == NG_WINDOWS) {
+        // Windowsでは通常キーで「」を入力
+        raise_zmk_keycode_state_changed_from_encoded(LBKT, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(LBKT, false, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(RBKT, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(RBKT, false, timestamp);
+        // IMEの未確定を確定
+        raise_zmk_keycode_state_changed_from_encoded(ENTER, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(ENTER, false, timestamp);
+        ng_schedule_move_right_after_next_enter();
+        ng_prev_char();
+        return;
+    }
     input_unicode_hex(N3, N0, N0, C);
 }
 
 void ngh_JKG()
 { // ({改行}
+    if (naginata_config.os == NG_WINDOWS) {
+        input_unicode_hex(N3, N0, N0, A); // 《
+        input_unicode_hex(N3, N0, N0, B); // 》
+        ng_schedule_move_right_after_next_enter();
+        ng_prev_char();
+        return;
+    }
     input_unicode_hex(F, F, N0, N8);
 }
 
@@ -256,6 +374,13 @@ void ngh_JKZ()
 
 void ngh_JKX()
 { // 』{改行}
+    if (naginata_config.os == NG_WINDOWS) {
+        input_unicode_hex(N3, N0, N1, N0); // 【
+        input_unicode_hex(N3, N0, N1, N1); // 】
+        ng_schedule_move_right_after_next_enter();
+        ng_prev_char();
+        return;
+    }
     input_unicode_hex(N3, N0, N0, F);
 }
 

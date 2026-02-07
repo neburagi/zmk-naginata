@@ -7,6 +7,8 @@ void return_to_kana_input(void);
 void press_compose_key(void);
 void release_compose_key(void);
 void input_unicode_hex(int, int, int, int);
+void ng_schedule_move_right_after_next_enter(void);
+void ng_post_enter_maybe_move_right(void);
 
 void ng_T(void);
 void ng_Y(void);
