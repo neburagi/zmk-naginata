@@ -1,0 +1,16 @@
+# Copyright (c) 2026 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+
+description: Naginata off key with shift hold and optional caps word on tap
+
+compatible: "zmk,behavior-ng-off-shift"
+
+include: zero_param.yaml
+
+properties:
+  tapping-term-ms:
+    type: int
+    default: 200
+  caps-word-behavior:
+    type: phandle
+    required: true
