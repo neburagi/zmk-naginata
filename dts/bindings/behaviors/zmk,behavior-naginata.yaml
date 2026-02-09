@@ -6,3 +6,8 @@ description: Naginata-shiki behavior
 compatible: "zmk,behavior-naginata"
 
 include: one_param.yaml
+
+properties:
+  late-shift-window-ms:
+    type: int
+    default: 80

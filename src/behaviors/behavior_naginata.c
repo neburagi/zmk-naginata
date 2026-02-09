@@ -67,9 +67,15 @@ extern int64_t timestamp;
 #define B_SPACE (1UL << 30)
 
 static NGListArray nginput;
+static int64_t nginput_updated_at[LIST_SIZE];
 static uint32_t pressed_keys = 0UL; // 押しているキーのビットをたてる
 static int8_t n_pressed_keys = 0;   // 押しているキーの数
 static uint64_t bypass_keys = 0ULL;
+static uint32_t late_shift_window_ms = 80;
+
+struct behavior_naginata_config {
+    uint32_t late_shift_window_ms;
+};
 
 #define NG_WINDOWS 0
 #define NG_MACOS 1
@@ -486,6 +492,43 @@ static bool nglist_contains_shift_key(const NGList *keys) {
            nglist_contains_key(keys, ENTER);
 }
 
+static void clear_nginput_timestamps(void) {
+    for (int i = 0; i < LIST_SIZE; i++) {
+        nginput_updated_at[i] = 0;
+    }
+}
+
+static bool nginput_add(NGList *list) {
+    bool ok = addToListArray(&nginput, list);
+    if (ok && nginput.size > 0) {
+        nginput_updated_at[nginput.size - 1] = timestamp;
+    }
+    return ok;
+}
+
+static bool nginput_remove_at(int idx) {
+    if (idx < 0 || idx >= nginput.size) {
+        return false;
+    }
+    if (!removeFromListArrayAt(&nginput, idx)) {
+        return false;
+    }
+    for (int i = idx; i < LIST_SIZE - 1; i++) {
+        nginput_updated_at[i] = nginput_updated_at[i + 1];
+    }
+    nginput_updated_at[LIST_SIZE - 1] = 0;
+    return true;
+}
+
+static bool within_late_shift_window(int idx) {
+    if (idx < 0 || idx >= nginput.size) {
+        return false;
+    }
+
+    int64_t age = timestamp - nginput_updated_at[idx];
+    return age >= 0 && age <= late_shift_window_ms;
+}
+
 static bool has_shift_match(const NGList *keys) {
     if (keys->size == 0 || keys->size >= 3) {
         return false;
@@ -510,7 +553,8 @@ static void add_shift_key_to_input(uint32_t keycode) {
     if (nginput.size > 0) {
         NGList last;
         copyList(&(nginput.elements[nginput.size - 1]), &last);
-        if (last.size > 0 && last.size < 3 && !nglist_contains_shift_key(&last)) {
+        if (last.size > 0 && last.size < 3 && !nglist_contains_shift_key(&last) &&
+            within_late_shift_window(nginput.size - 1)) {
             NGList shifted;
             initializeList(&shifted);
             addToList(&shifted, keycode);
@@ -518,8 +562,8 @@ static void add_shift_key_to_input(uint32_t keycode) {
                 addToList(&shifted, last.elements[i]);
             }
             if (number_of_matches(&shifted) > 0) {
-                removeFromListArrayAt(&nginput, nginput.size - 1);
-                addToListArray(&nginput, &shifted);
+                nginput_remove_at(nginput.size - 1);
+                nginput_add(&shifted);
                 combined = true;
             }
         }
@@ -529,7 +573,7 @@ static void add_shift_key_to_input(uint32_t keycode) {
         NGList a;
         initializeList(&a);
         addToList(&a, keycode);
-        addToListArray(&nginput, &a);
+        nginput_add(&a);
     }
 }
 
@@ -626,7 +670,7 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
             NGList a;
             initializeList(&a);
             addToList(&a, keycode);
-            addToListArray(&nginput, &a);
+            nginput_add(&a);
         } else {
             NGList a;
             NGList b;
@@ -640,15 +684,15 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
             // 同じキー連打を除外
             if (nginput.size > 0 && a.elements[a.size - 1] != keycode &&
                 number_of_candidates(&b) > 0) {
-                removeFromListArrayAt(&nginput, nginput.size - 1);
-                addToListArray(&nginput, &b);
+                nginput_remove_at(nginput.size - 1);
+                nginput_add(&b);
                 // 前のキーと同時押しはない
             } else {
                 // 連続シフトではない
                 NGList e;
                 initializeList(&e);
                 addToList(&e, keycode);
-                addToListArray(&nginput, &e);
+                nginput_add(&e);
             }
         }
 
@@ -681,19 +725,21 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
 
             if (c < 0 && ((brs & pressed_keys) == brs) && (keyset & brs) != brs && number_of_matches(&rskc) > 0) {
                 nginput.elements[nginput.size - 1] = rskc;
+                nginput_updated_at[nginput.size - 1] = timestamp;
                 break;
             }
         }
 
         bool defer_for_space_shift = false;
         if ((pressed_keys & B_SPACE) == 0 && nginput.size > 0) {
-            defer_for_space_shift = has_shift_match(&(nginput.elements[0]));
+            defer_for_space_shift =
+                has_shift_match(&(nginput.elements[0])) && within_late_shift_window(0);
         }
 
         if (!defer_for_space_shift &&
             (nginput.size > 1 || number_of_candidates(&(nginput.elements[0])) == 1)) {
             ng_type(&(nginput.elements[0]));
-            removeFromListArrayAt(&nginput, 0);
+            nginput_remove_at(0);
         }
         break;
     }
@@ -736,12 +782,12 @@ bool naginata_release(struct zmk_behavior_binding *binding,
         if (pressed_keys == 0UL) {
             while (nginput.size > 0) {
                 ng_type(&(nginput.elements[0]));
-                removeFromListArrayAt(&nginput, 0);
+                nginput_remove_at(0);
             }
         } else {
             if (nginput.size > 0 && number_of_candidates(&(nginput.elements[0])) == 1) {
                 ng_type(&(nginput.elements[0]));
-                removeFromListArrayAt(&nginput, 0);
+                nginput_remove_at(0);
             }
         }
         break;
@@ -756,11 +802,14 @@ bool naginata_release(struct zmk_behavior_binding *binding,
 
 static int behavior_naginata_init(const struct device *dev) {
     LOG_DBG("NAGINATA INIT");
+    const struct behavior_naginata_config *cfg = dev->config;
 
     initializeListArray(&nginput);
+    clear_nginput_timestamps();
     pressed_keys = 0UL;
     n_pressed_keys = 0;
     naginata_config.os =  NG_WINDOWS;
+    late_shift_window_ms = cfg->late_shift_window_ms;
 
     return 0;
 };
@@ -808,7 +857,11 @@ static const struct behavior_driver_api behavior_naginata_driver_api = {
     .binding_pressed = on_keymap_binding_pressed, .binding_released = on_keymap_binding_released};
 
 #define KP_INST(n)                                                                                 \
-    BEHAVIOR_DT_INST_DEFINE(n, behavior_naginata_init, NULL, NULL, NULL, POST_KERNEL,              \
+    static const struct behavior_naginata_config behavior_naginata_config_##n = {                  \
+        .late_shift_window_ms = DT_INST_PROP(n, late_shift_window_ms),                             \
+    };                                                                                              \
+    BEHAVIOR_DT_INST_DEFINE(n, behavior_naginata_init, NULL, NULL,                                 \
+                            &behavior_naginata_config_##n, POST_KERNEL,                            \
                             CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, &behavior_naginata_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(KP_INST)
