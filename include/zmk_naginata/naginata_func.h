@@ -9,6 +9,7 @@ void release_compose_key(void);
 void input_unicode_hex(int, int, int, int);
 void ng_schedule_move_right_after_next_enter(void);
 void ng_post_enter_maybe_move_right(void);
+void ng_set_func_backspace_action(uint8_t backspace_count, uint8_t delete_count);
 
 void ng_T(void);
 void ng_Y(void);

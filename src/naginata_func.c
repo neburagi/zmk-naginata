@@ -278,6 +278,7 @@ void ngh_JKW()
         input_unicode_hex(N3, N0, N0, F); // 』
         ng_schedule_move_right_after_next_enter();
         ng_prev_char();
+        ng_set_func_backspace_action(1, 1);
         return;
     }
     input_unicode_hex(F, F, N0, F);
@@ -323,6 +324,7 @@ void ngh_JKS()
         raise_zmk_keycode_state_changed_from_encoded(ENTER, false, timestamp);
         ng_schedule_move_right_after_next_enter();
         ng_prev_char();
+        ng_set_func_backspace_action(1, 1);
         return;
     }
     input_unicode_hex(N3, N0, N0, E);
@@ -349,6 +351,7 @@ void ngh_JKF()
         raise_zmk_keycode_state_changed_from_encoded(ENTER, false, timestamp);
         ng_schedule_move_right_after_next_enter();
         ng_prev_char();
+        ng_set_func_backspace_action(1, 1);
         return;
     }
     input_unicode_hex(N3, N0, N0, C);
@@ -361,6 +364,7 @@ void ngh_JKG()
         input_unicode_hex(N3, N0, N0, B); // 》
         ng_schedule_move_right_after_next_enter();
         ng_prev_char();
+        ng_set_func_backspace_action(1, 1);
         return;
     }
     input_unicode_hex(F, F, N0, N8);
@@ -379,6 +383,7 @@ void ngh_JKX()
         input_unicode_hex(N3, N0, N1, N1); // 】
         ng_schedule_move_right_after_next_enter();
         ng_prev_char();
+        ng_set_func_backspace_action(1, 1);
         return;
     }
     input_unicode_hex(N3, N0, N0, F);
