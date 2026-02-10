@@ -77,6 +77,11 @@ struct behavior_naginata_config {
     uint32_t late_shift_window_ms;
 };
 
+#define KANA_BACKSPACE_HISTORY_SIZE 10
+static uint8_t kana_output_len_history[KANA_BACKSPACE_HISTORY_SIZE];
+static uint8_t kana_output_len_history_size = 0;
+static bool kana_backspace_armed = false;
+
 #define NG_WINDOWS 0
 #define NG_MACOS 1
 #define NG_LINUX 2
@@ -492,6 +497,99 @@ static bool nglist_contains_shift_key(const NGList *keys) {
            nglist_contains_key(keys, ENTER);
 }
 
+static void clear_kana_output_history(void) {
+    kana_output_len_history_size = 0;
+    kana_backspace_armed = false;
+}
+
+static void disarm_kana_backspace_history(void) { kana_backspace_armed = false; }
+
+static void push_kana_output_len(uint8_t len) {
+    if (len == 0) {
+        return;
+    }
+    if (len > 5) {
+        len = 5;
+    }
+
+    if (kana_output_len_history_size >= KANA_BACKSPACE_HISTORY_SIZE) {
+        for (int i = 1; i < KANA_BACKSPACE_HISTORY_SIZE; i++) {
+            kana_output_len_history[i - 1] = kana_output_len_history[i];
+        }
+        kana_output_len_history_size = KANA_BACKSPACE_HISTORY_SIZE - 1;
+    }
+
+    kana_output_len_history[kana_output_len_history_size++] = len;
+    kana_backspace_armed = true;
+}
+
+static uint8_t pop_kana_output_len(void) {
+    if (kana_output_len_history_size == 0) {
+        kana_backspace_armed = false;
+        return 0;
+    }
+
+    uint8_t len = kana_output_len_history[--kana_output_len_history_size];
+    kana_backspace_armed = (kana_output_len_history_size > 0);
+    return len;
+}
+
+static bool is_alpha_keycode(uint32_t keycode) { return keycode >= A && keycode <= Z; }
+
+static bool is_vowel_keycode(uint32_t keycode) {
+    return keycode == A || keycode == I || keycode == U || keycode == E || keycode == O;
+}
+
+static uint8_t estimate_kana_output_len(const uint32_t kana[6]) {
+    uint32_t seq[6];
+    int n = 0;
+    for (int i = 0; i < 6; i++) {
+        if (kana[i] == NONE) {
+            break;
+        }
+        seq[n++] = kana[i];
+    }
+
+    if (n <= 0) {
+        return 0;
+    }
+    if (n == 1) {
+        return 1;
+    }
+
+    for (int i = 0; i < n; i++) {
+        if (!is_alpha_keycode(seq[i])) {
+            return 1;
+        }
+    }
+
+    if (seq[0] == X) {
+        return 1;
+    }
+    if (n == 2 && seq[0] == N && seq[1] == N) {
+        return 1;
+    }
+    if (n >= 3 && seq[1] == Y && is_vowel_keycode(seq[2])) {
+        return 2;
+    }
+    if (n >= 3 && seq[1] == H && is_vowel_keycode(seq[2])) {
+        return 2;
+    }
+    for (int i = 1; i < n; i++) {
+        if (seq[i] == X) {
+            return 2;
+        }
+    }
+    if (n == 2 && (seq[0] == F || seq[0] == V) && is_vowel_keycode(seq[1])) {
+        return 2;
+    }
+    if (n == 2 && seq[0] == W && (seq[1] == I || seq[1] == E)) {
+        return 2;
+    }
+
+    return 1;
+}
+
 static void clear_nginput_timestamps(void) {
     for (int i = 0; i < LIST_SIZE; i++) {
         nginput_updated_at[i] = 0;
@@ -589,12 +687,25 @@ void ng_type(NGList *keys) {
         raise_zmk_keycode_state_changed_from_encoded(ENTER, true, timestamp);
         raise_zmk_keycode_state_changed_from_encoded(ENTER, false, timestamp);
         ng_post_enter_maybe_move_right();
+        clear_kana_output_history();
         return;
     }
     if (keys->size == 1 && keys->elements[0] == BACKSPACE) {
-        LOG_DBG(" NAGINATA type keycode 0x%02X", BACKSPACE);
-        raise_zmk_keycode_state_changed_from_encoded(BACKSPACE, true, timestamp);
-        raise_zmk_keycode_state_changed_from_encoded(BACKSPACE, false, timestamp);
+        uint8_t delete_count = 1;
+        if (kana_backspace_armed && kana_output_len_history_size > 0) {
+            uint8_t hist_len = pop_kana_output_len();
+            if (hist_len > 0) {
+                delete_count = hist_len;
+            }
+        } else {
+            clear_kana_output_history();
+        }
+
+        for (int i = 0; i < delete_count; i++) {
+            LOG_DBG(" NAGINATA type keycode 0x%02X", BACKSPACE);
+            raise_zmk_keycode_state_changed_from_encoded(BACKSPACE, true, timestamp);
+            raise_zmk_keycode_state_changed_from_encoded(BACKSPACE, false, timestamp);
+        }
         return;
     }
 
@@ -606,6 +717,7 @@ void ng_type(NGList *keys) {
     for (int i = 0; i < sizeof ngdickana / sizeof ngdickana[0]; i++) {
         if ((ngdickana[i].shift | ngdickana[i].douji) == keyset) {
             if (ngdickana[i].kana[0] != NONE) {
+                uint8_t out_len = estimate_kana_output_len(ngdickana[i].kana);
                 for (int k = 0; k < 6; k++) {
                     if (ngdickana[i].kana[k] == NONE)
                         break;
@@ -615,8 +727,10 @@ void ng_type(NGList *keys) {
                     raise_zmk_keycode_state_changed_from_encoded(ngdickana[i].kana[k], false,
                                                                  timestamp);
                 }
+                push_kana_output_len(out_len);
             } else {
                 ngdickana[i].func();
+                clear_kana_output_history();
             }
             LOG_DBG("<NAGINATA NG_TYPE");
             return;
@@ -658,8 +772,12 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
             if (bit) {
                 bypass_keys |= bit;
             }
+            clear_kana_output_history();
             raise_zmk_keycode_state_changed_from_encoded(keycode, true, timestamp);
             return true;
+        }
+        if (keycode != BACKSPACE) {
+            disarm_kana_backspace_history();
         }
         n_pressed_keys++;
         pressed_keys |= ng_keycode_to_bit(keycode); // キーの重ね合わせ
@@ -806,6 +924,7 @@ static int behavior_naginata_init(const struct device *dev) {
 
     initializeListArray(&nginput);
     clear_nginput_timestamps();
+    clear_kana_output_history();
     pressed_keys = 0UL;
     n_pressed_keys = 0;
     naginata_config.os =  NG_WINDOWS;
