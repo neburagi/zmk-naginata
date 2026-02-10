@@ -17,8 +17,8 @@
 #include <zmk/event_manager.h>
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/events/position_state_changed.h>
-#include <zmk/keymap.h>
 #include <dt-bindings/zmk/keys.h>
+#include <zmk_naginata/naginata_func.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -35,22 +35,12 @@ struct behavior_ng_off_shift_data {
     bool interrupted;
     bool shift_pressed;
     uint32_t position;
-    int64_t pressed_at;
     struct zmk_behavior_binding_event caps_word_event;
     struct k_work_delayable caps_word_work;
 #if IS_ENABLED(CONFIG_ZMK_SPLIT)
     uint8_t source;
 #endif
 };
-
-static int tap_keycode(uint32_t keycode, int64_t timestamp) {
-    int ret = raise_zmk_keycode_state_changed_from_encoded(keycode, true, timestamp);
-    if (ret < 0) {
-        return ret;
-    }
-
-    return raise_zmk_keycode_state_changed_from_encoded(keycode, false, timestamp);
-}
 
 static int tap_caps_word(const struct behavior_ng_off_shift_config *cfg,
                          struct zmk_behavior_binding_event event) {
@@ -106,7 +96,7 @@ static int on_ng_off_shift_pressed(struct zmk_behavior_binding *binding,
         if (is_same_key_press(data, event)) {
             return ZMK_BEHAVIOR_OPAQUE;
         }
-        LOG_WRN("ng-off-shift already active for another position");
+        LOG_WRN("ng_off_lock already active for another position");
         return -ENOTSUP;
     }
 
@@ -114,18 +104,15 @@ static int on_ng_off_shift_pressed(struct zmk_behavior_binding *binding,
     data->interrupted = false;
     data->shift_pressed = false;
     data->position = event.position;
-    data->pressed_at = event.timestamp;
     k_work_cancel_delayable(&data->caps_word_work);
 #if IS_ENABLED(CONFIG_ZMK_SPLIT)
     data->source = event.source;
 #endif
 
-    tap_keycode(LANGUAGE_2, event.timestamp);
-    tap_keycode(INTERNATIONAL_5, event.timestamp);
-    zmk_keymap_layer_to(0);
-
+    ng_set_forced_bypass(1);
     int ret = raise_zmk_keycode_state_changed_from_encoded(LSHIFT, true, event.timestamp);
     if (ret < 0) {
+        ng_set_forced_bypass(0);
         data->active = false;
         return ret;
     }
@@ -147,6 +134,8 @@ static int on_ng_off_shift_released(struct zmk_behavior_binding *binding,
         raise_zmk_keycode_state_changed_from_encoded(LSHIFT, false, event.timestamp);
         data->shift_pressed = false;
     }
+    ng_set_forced_bypass(0);
+    ng_arm_bypass_latch();
 
     if (!data->interrupted) {
         data->caps_word_event = event;
@@ -173,6 +162,7 @@ static int ng_off_shift_position_state_changed_listener(const zmk_event_t *eh);
 static int behavior_ng_off_shift_init(const struct device *dev) {
     struct behavior_ng_off_shift_data *data = dev->data;
     data->dev = dev;
+    ng_set_forced_bypass(0);
     k_work_init_delayable(&data->caps_word_work, ng_off_shift_caps_word_work_handler);
     return 0;
 }
@@ -208,9 +198,9 @@ static int ng_off_shift_position_state_changed_listener(const zmk_event_t *eh) {
 
 #define NG_OFF_SHIFT_INST(n)                                                                        \
     static struct behavior_ng_off_shift_data behavior_ng_off_shift_data_##n = {};                  \
-    static const struct behavior_ng_off_shift_config behavior_ng_off_shift_config_##n = {           \
-        .tapping_term_ms = DT_INST_PROP(n, tapping_term_ms),                                       \
-        .caps_word_behavior_dev = DEVICE_DT_NAME(DT_INST_PHANDLE(n, caps_word_behavior)),           \
+    static const struct behavior_ng_off_shift_config behavior_ng_off_shift_config_##n = {          \
+        .tapping_term_ms = DT_INST_PROP(n, tapping_term_ms),                                        \
+        .caps_word_behavior_dev = DEVICE_DT_NAME(DT_INST_PHANDLE(n, caps_word_behavior)),          \
     };                                                                                               \
     BEHAVIOR_DT_INST_DEFINE(n, behavior_ng_off_shift_init, NULL,                                    \
                             &behavior_ng_off_shift_data_##n,                                         \

@@ -15,6 +15,7 @@
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/behavior.h>
 #include <zmk/hid.h>
+#include <dt-bindings/zmk/modifiers.h>
 
 #include <zmk_naginata/nglist.h>
 #include <zmk_naginata/nglistarray.h>
@@ -71,6 +72,8 @@ static int64_t nginput_updated_at[LIST_SIZE];
 static uint32_t pressed_keys = 0UL; // 押しているキーのビットをたてる
 static int8_t n_pressed_keys = 0;   // 押しているキーの数
 static uint64_t bypass_keys = 0ULL;
+static bool alpha_backspace_bypass_latched = false;
+static bool forced_bypass_from_ng_off_lock = false;
 static uint32_t late_shift_window_ms = 80;
 
 struct behavior_naginata_config {
@@ -109,16 +112,26 @@ static uint64_t bypass_bit(uint32_t keycode) {
         return 1ULL << 26;
     case ENTER:
         return 1ULL << 27;
-    case BACKSPACE:
-        return 1ULL << 32;
-    case DOT:
+    case TAB:
         return 1ULL << 28;
-    case COMMA:
+    case RIGHT:
         return 1ULL << 29;
-    case SLASH:
+    case LEFT:
         return 1ULL << 30;
-    case SEMI:
+    case DOWN:
         return 1ULL << 31;
+    case UP:
+        return 1ULL << 32;
+    case BACKSPACE:
+        return 1ULL << 33;
+    case DOT:
+        return 1ULL << 34;
+    case COMMA:
+        return 1ULL << 35;
+    case SLASH:
+        return 1ULL << 36;
+    case SEMI:
+        return 1ULL << 37;
     default:
         return 0ULL;
     }
@@ -567,7 +580,21 @@ void ng_set_func_backspace_action(uint8_t backspace_count, uint8_t delete_count)
     pending_func_delete_count = delete_count;
 }
 
+void ng_set_forced_bypass(uint8_t active) { forced_bypass_from_ng_off_lock = (active != 0); }
+
+void ng_arm_bypass_latch(void) { alpha_backspace_bypass_latched = true; }
+
 static bool is_alpha_keycode(uint32_t keycode) { return keycode >= A && keycode <= Z; }
+
+static bool is_navigation_or_tab_keycode(uint32_t keycode) {
+    return keycode == TAB || keycode == LEFT || keycode == RIGHT || keycode == UP ||
+           keycode == DOWN;
+}
+
+static bool is_latched_bypass_keycode(uint32_t keycode) {
+    return is_alpha_keycode(keycode) || keycode == BACKSPACE || keycode == SPACE ||
+           is_navigation_or_tab_keycode(keycode);
+}
 
 static bool is_vowel_keycode(uint32_t keycode) {
     return keycode == A || keycode == I || keycode == U || keycode == E || keycode == O;
@@ -821,7 +848,36 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
     case COMMA:
     case SLASH:
     case SEMI:
-        if (zmk_hid_get_explicit_mods()) {
+    case TAB:
+    case LEFT:
+    case RIGHT:
+    case UP:
+    case DOWN:
+        zmk_mod_flags_t explicit_mods = zmk_hid_get_explicit_mods();
+        zmk_mod_flags_t active_mods = zmk_hid_get_keyboard_report()->body.modifiers;
+        bool shift_mods_active = (active_mods & (MOD_LSFT | MOD_RSFT)) != 0;
+        bool mods_bypass_active =
+            explicit_mods || shift_mods_active || forced_bypass_from_ng_off_lock;
+        bool is_latched_bypass_key = is_latched_bypass_keycode(keycode);
+        bool is_passthrough_only_key = is_navigation_or_tab_keycode(keycode);
+
+        if (alpha_backspace_bypass_latched && !is_latched_bypass_key) {
+            alpha_backspace_bypass_latched = false;
+        }
+
+        if (mods_bypass_active || (alpha_backspace_bypass_latched && is_latched_bypass_key)) {
+            uint64_t bit = bypass_bit(keycode);
+            if (bit) {
+                bypass_keys |= bit;
+            }
+            if (shift_mods_active && is_alpha_keycode(keycode)) {
+                alpha_backspace_bypass_latched = true;
+            }
+            clear_kana_output_history();
+            raise_zmk_keycode_state_changed_from_encoded(keycode, true, timestamp);
+            return true;
+        }
+        if (is_passthrough_only_key) {
             uint64_t bit = bypass_bit(keycode);
             if (bit) {
                 bypass_keys |= bit;
@@ -942,6 +998,11 @@ bool naginata_release(struct zmk_behavior_binding *binding,
     case COMMA:
     case SLASH:
     case SEMI:
+    case TAB:
+    case LEFT:
+    case RIGHT:
+    case UP:
+    case DOWN:
         {
             uint64_t bit = bypass_bit(keycode);
             if (bit && (bypass_keys & bit)) {
@@ -949,6 +1010,9 @@ bool naginata_release(struct zmk_behavior_binding *binding,
                 raise_zmk_keycode_state_changed_from_encoded(keycode, false, timestamp);
                 return true;
             }
+        }
+        if (is_navigation_or_tab_keycode(keycode)) {
+            return true;
         }
         if (n_pressed_keys > 0)
             n_pressed_keys--;
@@ -987,6 +1051,8 @@ static int behavior_naginata_init(const struct device *dev) {
     clear_kana_output_history();
     pressed_keys = 0UL;
     n_pressed_keys = 0;
+    alpha_backspace_bypass_latched = false;
+    forced_bypass_from_ng_off_lock = false;
     naginata_config.os =  NG_WINDOWS;
     late_shift_window_ms = cfg->late_shift_window_ms;
 
