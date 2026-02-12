@@ -43,21 +43,28 @@ void naginata_on(void)
 
 void nofunc() {}
 
-static bool move_right_after_next_enter = false;
+// Pending cursor-right moves to consume after ENTER.
+// Using a counter allows nested paired symbols to be exited one layer at a time.
+static uint8_t move_right_after_next_enter_count = 0;
 
 void ng_schedule_move_right_after_next_enter(void)
 {
-    move_right_after_next_enter = true;
+    if (move_right_after_next_enter_count < 0xFF) {
+        move_right_after_next_enter_count++;
+    }
 }
 
 void ng_post_enter_maybe_move_right(void)
 {
-    if (!move_right_after_next_enter) {
+    if (move_right_after_next_enter_count == 0) {
         return;
     }
-    move_right_after_next_enter = false;
-    raise_zmk_keycode_state_changed_from_encoded(RIGHT, true, timestamp);
-    raise_zmk_keycode_state_changed_from_encoded(RIGHT, false, timestamp);
+    uint8_t pending = move_right_after_next_enter_count;
+    move_right_after_next_enter_count = 0;
+    for (uint8_t i = 0; i < pending; i++) {
+        raise_zmk_keycode_state_changed_from_encoded(RIGHT, true, timestamp);
+        raise_zmk_keycode_state_changed_from_encoded(RIGHT, false, timestamp);
+    }
 }
 
 static void input_windows_hex_keycode(int keycode)

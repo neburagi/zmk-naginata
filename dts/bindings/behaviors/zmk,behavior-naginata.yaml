@@ -11,3 +11,7 @@ properties:
   late-shift-window-ms:
     type: int
     default: 80
+  kuten-confirm-enter:
+    type: int
+    default: 1
+    description: "0=disabled, 1=enter, 2=space"
