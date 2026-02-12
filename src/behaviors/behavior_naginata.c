@@ -90,13 +90,18 @@ typedef struct {
     uint8_t delete_count;
 } kana_delete_action_t;
 
+typedef struct {
+    uint8_t backspace_count;
+    uint8_t delete_count;
+    bool from_history;
+} naginata_backspace_action_t;
+
 static kana_delete_action_t kana_delete_history[KANA_BACKSPACE_HISTORY_SIZE];
 static uint8_t kana_delete_history_size = 0;
 static bool kana_backspace_armed = false;
 static bool kana_backspace_needs_space_undo = false;
 static uint8_t pending_func_backspace_count = 0;
 static uint8_t pending_func_delete_count = 0;
-static uint8_t pending_immediate_backspace_releases = 0;
 
 #define NG_WINDOWS 0
 #define NG_MACOS 1
@@ -883,41 +888,60 @@ static void add_shift_key_to_input(uint32_t keycode) {
     }
 }
 
-static void process_naginata_backspace_action(void) {
-    uint8_t backspace_count = 1;
-    uint8_t delete_count = 0;
+static naginata_backspace_action_t resolve_naginata_backspace_action(void) {
+    naginata_backspace_action_t action = {
+        .backspace_count = 1,
+        .delete_count = 0,
+        .from_history = false,
+    };
+
     if (kana_backspace_needs_space_undo && kana_delete_history_size > 0) {
         // 変換解除に必要な1回分と、削除アクションを1回のBSに統合する
         kana_backspace_needs_space_undo = false;
-        kana_delete_action_t action = pop_kana_delete_action();
-        if (action.backspace_count > 0 || action.delete_count > 0) {
-            uint16_t merged = (uint16_t)action.backspace_count + 1U;
-            backspace_count = (merged > 0xFFU) ? 0xFFU : (uint8_t)merged;
-            delete_count = action.delete_count;
+        action.from_history = true;
+        kana_delete_action_t history_action = pop_kana_delete_action();
+        if (history_action.backspace_count > 0 || history_action.delete_count > 0) {
+            uint16_t merged = (uint16_t)history_action.backspace_count + 1U;
+            action.backspace_count = (merged > 0xFFU) ? 0xFFU : (uint8_t)merged;
+            action.delete_count = history_action.delete_count;
         } else {
-            backspace_count = 1;
-            delete_count = 0;
+            action.backspace_count = 1;
+            action.delete_count = 0;
         }
     } else if (kana_backspace_armed && kana_delete_history_size > 0) {
-        kana_delete_action_t action = pop_kana_delete_action();
-        if (action.backspace_count > 0 || action.delete_count > 0) {
-            backspace_count = action.backspace_count;
-            delete_count = action.delete_count;
+        action.from_history = true;
+        kana_delete_action_t history_action = pop_kana_delete_action();
+        if (history_action.backspace_count > 0 || history_action.delete_count > 0) {
+            action.backspace_count = history_action.backspace_count;
+            action.delete_count = history_action.delete_count;
         }
     } else {
         clear_kana_output_history();
     }
 
-    for (int i = 0; i < backspace_count; i++) {
+    return action;
+}
+
+static void emit_naginata_backspace_action(const naginata_backspace_action_t *action) {
+    for (int i = 0; i < action->backspace_count; i++) {
         LOG_DBG(" NAGINATA type keycode 0x%02X", BACKSPACE);
         raise_zmk_keycode_state_changed_from_encoded(BACKSPACE, true, timestamp);
         raise_zmk_keycode_state_changed_from_encoded(BACKSPACE, false, timestamp);
     }
-    for (int i = 0; i < delete_count; i++) {
+    for (int i = 0; i < action->delete_count; i++) {
         LOG_DBG(" NAGINATA type keycode 0x%02X", DELETE);
         raise_zmk_keycode_state_changed_from_encoded(DELETE, true, timestamp);
         raise_zmk_keycode_state_changed_from_encoded(DELETE, false, timestamp);
     }
+}
+
+static void press_backspace_for_repeat(void) {
+    uint64_t bit = bypass_bit(BACKSPACE);
+    if (bit) {
+        bypass_keys |= bit;
+    }
+    LOG_DBG(" NAGINATA type keycode 0x%02X", BACKSPACE);
+    raise_zmk_keycode_state_changed_from_encoded(BACKSPACE, true, timestamp);
 }
 
 // キー入力を文字に変換して出力する
@@ -936,7 +960,8 @@ void ng_type(NGList *keys) {
         return;
     }
     if (keys->size == 1 && keys->elements[0] == BACKSPACE) {
-        process_naginata_backspace_action();
+        naginata_backspace_action_t action = resolve_naginata_backspace_action();
+        emit_naginata_backspace_action(&action);
         return;
     }
 
@@ -1111,10 +1136,16 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
             return true;
         }
         if (keycode == BACKSPACE) {
-            process_naginata_backspace_action();
-            if (pending_immediate_backspace_releases < 0xFF) {
-                pending_immediate_backspace_releases++;
+            naginata_backspace_action_t action = resolve_naginata_backspace_action();
+            if (action.from_history) {
+                // 履歴削除の最後の1回は押下維持に置き換えて、削除数を増やさず長押しリピートへ移行
+                naginata_backspace_action_t pre_action = action;
+                if (pre_action.backspace_count > 0) {
+                    pre_action.backspace_count--;
+                }
+                emit_naginata_backspace_action(&pre_action);
             }
+            press_backspace_for_repeat();
             return true;
         }
         if (is_passthrough_only_key) {
@@ -1243,10 +1274,6 @@ bool naginata_release(struct zmk_behavior_binding *binding,
     case RIGHT:
     case UP:
     case DOWN:
-        if (keycode == BACKSPACE && pending_immediate_backspace_releases > 0) {
-            pending_immediate_backspace_releases--;
-            return true;
-        }
         {
             uint64_t bit = bypass_bit(keycode);
             if (bit && (consumed_jk_combo_release_keys & bit)) {
@@ -1309,7 +1336,6 @@ static int behavior_naginata_init(const struct device *dev) {
     initializeListArray(&nginput);
     clear_nginput_timestamps();
     clear_kana_output_history();
-    pending_immediate_backspace_releases = 0;
     reset_pressed_keys_state();
     n_pressed_keys = 0;
     bypass_keys = 0ULL;
