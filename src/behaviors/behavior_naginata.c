@@ -591,9 +591,13 @@ static bool is_navigation_or_tab_keycode(uint32_t keycode) {
            keycode == DOWN;
 }
 
+static bool is_symbol_keycode(uint32_t keycode) {
+    return keycode == DOT || keycode == COMMA || keycode == SLASH || keycode == SEMI;
+}
+
 static bool is_latched_bypass_keycode(uint32_t keycode) {
     return is_alpha_keycode(keycode) || keycode == BACKSPACE || keycode == SPACE ||
-           is_navigation_or_tab_keycode(keycode);
+           is_navigation_or_tab_keycode(keycode) || is_symbol_keycode(keycode);
 }
 
 static bool is_vowel_keycode(uint32_t keycode) {
@@ -856,6 +860,10 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
         zmk_mod_flags_t explicit_mods = zmk_hid_get_explicit_mods();
         zmk_mod_flags_t active_mods = zmk_hid_get_keyboard_report()->body.modifiers;
         bool shift_mods_active = (active_mods & (MOD_LSFT | MOD_RSFT)) != 0;
+        if (forced_bypass_from_ng_off_lock && !shift_mods_active) {
+            // Fail-safe: ng_off_lock release取りこぼし時の強制バイパス残留を防ぐ
+            forced_bypass_from_ng_off_lock = false;
+        }
         bool mods_bypass_active =
             explicit_mods || shift_mods_active || forced_bypass_from_ng_off_lock;
         bool is_latched_bypass_key = is_latched_bypass_keycode(keycode);
@@ -870,7 +878,8 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
             if (bit) {
                 bypass_keys |= bit;
             }
-            if (shift_mods_active && is_alpha_keycode(keycode)) {
+            if (shift_mods_active &&
+                (is_alpha_keycode(keycode) || is_symbol_keycode(keycode))) {
                 alpha_backspace_bypass_latched = true;
             }
             clear_kana_output_history();
