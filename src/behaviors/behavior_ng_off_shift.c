@@ -17,6 +17,8 @@
 #include <zmk/event_manager.h>
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/events/position_state_changed.h>
+#include <zmk/hid.h>
+#include <zmk/keys.h>
 #include <dt-bindings/zmk/keys.h>
 #include <zmk_naginata/naginata_func.h>
 
@@ -32,11 +34,11 @@ struct behavior_ng_off_shift_config {
 struct behavior_ng_off_shift_data {
     const struct device *dev;
     bool active;
-    bool interrupted;
     bool shift_pressed;
+    bool caps_word_expected_active;
+    bool saw_other_key_press;
+    uint8_t active_other_keys_down;
     uint32_t position;
-    struct zmk_behavior_binding_event caps_word_event;
-    struct k_work_delayable caps_word_work;
 #if IS_ENABLED(CONFIG_ZMK_SPLIT)
     uint8_t source;
 #endif
@@ -60,16 +62,16 @@ static int tap_caps_word(const struct behavior_ng_off_shift_config *cfg,
     return zmk_behavior_invoke_binding(&caps_word_binding, event, false);
 }
 
-static void ng_off_shift_caps_word_work_handler(struct k_work *item) {
-    struct k_work_delayable *dwork = k_work_delayable_from_work(item);
-    struct behavior_ng_off_shift_data *data =
-        CONTAINER_OF(dwork, struct behavior_ng_off_shift_data, caps_word_work);
-    const struct behavior_ng_off_shift_config *cfg = data->dev->config;
-
-    int ret = tap_caps_word(cfg, data->caps_word_event);
+static int toggle_caps_word_expected_state(const struct behavior_ng_off_shift_config *cfg,
+                                           struct behavior_ng_off_shift_data *data,
+                                           struct zmk_behavior_binding_event event) {
+    int ret = tap_caps_word(cfg, event);
     if (ret < 0) {
-        LOG_WRN("caps word invocation failed: %d", ret);
+        return ret;
     }
+
+    data->caps_word_expected_active = !data->caps_word_expected_active;
+    return 0;
 }
 
 static bool is_same_key_press(const struct behavior_ng_off_shift_data *data,
@@ -101,10 +103,10 @@ static int on_ng_off_shift_pressed(struct zmk_behavior_binding *binding,
     }
 
     data->active = true;
-    data->interrupted = false;
     data->shift_pressed = false;
+    data->saw_other_key_press = false;
+    data->active_other_keys_down = 0;
     data->position = event.position;
-    k_work_cancel_delayable(&data->caps_word_work);
 #if IS_ENABLED(CONFIG_ZMK_SPLIT)
     data->source = event.source;
 #endif
@@ -124,6 +126,7 @@ static int on_ng_off_shift_pressed(struct zmk_behavior_binding *binding,
 static int on_ng_off_shift_released(struct zmk_behavior_binding *binding,
                                     struct zmk_behavior_binding_event event) {
     const struct device *dev = zmk_behavior_get_binding(binding->behavior_dev);
+    const struct behavior_ng_off_shift_config *cfg = dev->config;
     struct behavior_ng_off_shift_data *data = dev->data;
 
     if (!data->active || !is_same_key_press(data, event)) {
@@ -137,9 +140,19 @@ static int on_ng_off_shift_released(struct zmk_behavior_binding *binding,
     ng_set_forced_bypass(0);
     ng_arm_bypass_latch();
 
-    if (!data->interrupted) {
-        data->caps_word_event = event;
-        k_work_reschedule(&data->caps_word_work, K_MSEC(1));
+    // tap: no other key press while held -> toggle ON/OFF
+    if (!data->saw_other_key_press && data->active_other_keys_down == 0) {
+        int ret = toggle_caps_word_expected_state(cfg, data, event);
+        if (ret < 0) {
+            LOG_WRN("caps word invocation failed: %d", ret);
+        }
+    // hold as shift while caps word active -> disable caps word on release
+    } else if (data->caps_word_expected_active && data->saw_other_key_press &&
+               data->active_other_keys_down == 0) {
+        int ret = toggle_caps_word_expected_state(cfg, data, event);
+        if (ret < 0) {
+            LOG_WRN("caps word deactivation failed: %d", ret);
+        }
     }
 
     data->active = false;
@@ -158,21 +171,78 @@ static const struct behavior_driver_api behavior_ng_off_shift_driver_api = {
 static const struct device *devs[] = {DT_INST_FOREACH_STATUS_OKAY(GET_DEV)};
 
 static int ng_off_shift_position_state_changed_listener(const zmk_event_t *eh);
+static int ng_off_shift_keycode_state_changed_listener(const zmk_event_t *eh);
 
 static int behavior_ng_off_shift_init(const struct device *dev) {
     struct behavior_ng_off_shift_data *data = dev->data;
     data->dev = dev;
+    data->caps_word_expected_active = false;
+    data->saw_other_key_press = false;
+    data->active_other_keys_down = 0;
     ng_set_forced_bypass(0);
-    k_work_init_delayable(&data->caps_word_work, ng_off_shift_caps_word_work_handler);
     return 0;
 }
 
 ZMK_LISTENER(behavior_ng_off_shift, ng_off_shift_position_state_changed_listener);
 ZMK_SUBSCRIPTION(behavior_ng_off_shift, zmk_position_state_changed);
 
+ZMK_LISTENER(behavior_ng_off_shift_caps_sync, ng_off_shift_keycode_state_changed_listener);
+ZMK_SUBSCRIPTION(behavior_ng_off_shift_caps_sync, zmk_keycode_state_changed);
+
+static bool caps_word_is_alpha_usage(uint32_t usage_id) {
+    return usage_id >= ZMK_HID_USAGE_ID(A) && usage_id <= ZMK_HID_USAGE_ID(Z);
+}
+
+static bool caps_word_is_numeric_usage(uint32_t usage_id) {
+    return usage_id >= ZMK_HID_USAGE_ID(N1) && usage_id <= ZMK_HID_USAGE_ID(N0);
+}
+
+static bool caps_word_is_continue_usage(const struct zmk_keycode_state_changed *ev) {
+    if (ev->usage_page != HID_USAGE_KEY) {
+        return false;
+    }
+
+    switch (ev->keycode) {
+    case ZMK_HID_USAGE_ID(BACKSPACE):
+    case ZMK_HID_USAGE_ID(DELETE):
+    case ZMK_HID_USAGE_ID(SPACE):
+        return true;
+    case ZMK_HID_USAGE_ID(MINUS): {
+        zmk_mod_flags_t mods = ev->implicit_modifiers | zmk_hid_get_explicit_mods();
+        return (mods & (MOD_LSFT | MOD_RSFT)) != 0;
+    }
+    default:
+        return false;
+    }
+}
+
+static int ng_off_shift_keycode_state_changed_listener(const zmk_event_t *eh) {
+    const struct zmk_keycode_state_changed *ev = as_zmk_keycode_state_changed(eh);
+    if (ev == NULL || !ev->state) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    for (int i = 0; i < ARRAY_SIZE(devs); i++) {
+        struct behavior_ng_off_shift_data *data = devs[i]->data;
+        if (!data->caps_word_expected_active) {
+            continue;
+        }
+
+        if (caps_word_is_alpha_usage(ev->keycode) || caps_word_is_numeric_usage(ev->keycode) ||
+            is_mod(ev->usage_page, ev->keycode) || caps_word_is_continue_usage(ev)) {
+            continue;
+        }
+
+        // caps_word behavior auto-deactivates on these keys; keep local expectation in sync.
+        data->caps_word_expected_active = false;
+    }
+
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
 static int ng_off_shift_position_state_changed_listener(const zmk_event_t *eh) {
     const struct zmk_position_state_changed *ev = as_zmk_position_state_changed(eh);
-    if (ev == NULL || !ev->state) {
+    if (ev == NULL) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
@@ -190,7 +260,14 @@ static int ng_off_shift_position_state_changed_listener(const zmk_event_t *eh) {
             continue;
         }
 
-        data->interrupted = true;
+        if (ev->state) {
+            data->saw_other_key_press = true;
+            if (data->active_other_keys_down < UINT8_MAX) {
+                data->active_other_keys_down++;
+            }
+        } else if (data->active_other_keys_down > 0) {
+            data->active_other_keys_down--;
+        }
     }
 
     return ZMK_EV_EVENT_BUBBLE;
