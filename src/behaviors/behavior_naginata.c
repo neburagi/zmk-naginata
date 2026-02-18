@@ -1181,6 +1181,12 @@ static bool try_handle_bypass_jk_combo_press(uint32_t keycode, bool bypass_activ
         return false;
     }
 
+    // 修飾キーによるバイパス中は、右スペース(ENTER)を通常のEnterとして扱う。
+    // SPACE+ENTER同時押し判定は、ラッチ由来バイパス時のみ有効にする。
+    if ((keycode == SPACE || keycode == ENTER) && !clear_latched_bypass_on_enter) {
+        return false;
+    }
+
     if (!append_pending_bypass_jk_key(keycode)) {
         return false;
     }
