@@ -1,0 +1,15 @@
+/*
+ * Copyright (c) 2026 The ZMK Contributors
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/ {
+    behaviors {
+        /omit-if-no-ref/ tox: to_layer_press {
+            compatible = "zmk,behavior-to-layer-press";
+            label = "TO_LAYER_PRESS";
+            #binding-cells = <1>;
+        };
+    };
+};

@@ -1,0 +1,8 @@
+# Copyright (c) 2026 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+
+description: Switch to a layer and forward current position press/release to the target layer
+
+compatible: "zmk,behavior-to-layer-press"
+
+include: one_param.yaml

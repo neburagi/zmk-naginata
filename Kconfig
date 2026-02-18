@@ -9,3 +9,7 @@ config ZMK_BEHAVIOR_MOD_UNTIL_LAYER
 config ZMK_BEHAVIOR_NG_OFF_SHIFT
     bool "Enable Naginata-off shift-hold behavior"
     default y
+
+config ZMK_BEHAVIOR_TO_LAYER_PRESS
+    bool "Enable to-layer-press behavior"
+    default y

@@ -13,4 +13,8 @@ if (CONFIG_ZMK_BEHAVIOR_NG_OFF_SHIFT AND ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_S
   target_sources(app PRIVATE src/behaviors/behavior_ng_off_shift.c)
 endif()
 
+if (CONFIG_ZMK_BEHAVIOR_TO_LAYER_PRESS AND ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL))
+  target_sources(app PRIVATE src/behaviors/behavior_to_layer_press.c)
+endif()
+
 zephyr_include_directories(include)
