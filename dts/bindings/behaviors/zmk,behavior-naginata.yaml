@@ -11,6 +11,10 @@ properties:
   late-shift-window-ms:
     type: int
     default: 80
+  dual-space-window-ms:
+    type: int
+    default: 120
+    description: "late combo window for SPACE+ENTER dual-shift enter"
   kuten-confirm-enter:
     type: int
     default: 1

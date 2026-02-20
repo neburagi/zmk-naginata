@@ -79,10 +79,15 @@ static bool alpha_backspace_bypass_latched = false;
 static bool forced_bypass_from_ng_off_lock = false;
 static uint64_t consumed_jk_combo_release_keys = 0ULL;
 static uint32_t late_shift_window_ms = 80;
+static uint32_t dual_space_window_ms = 120;
 static uint8_t kuten_confirm_mode = 1U;
+static uint32_t last_naginata_pressed_keycode = NONE;
+static bool suppress_single_enter_tap = false;
+static bool naginata_emitting_keycode_event = false;
 
 struct behavior_naginata_config {
     uint32_t late_shift_window_ms;
+    uint32_t dual_space_window_ms;
     uint32_t kuten_confirm_enter;
 };
 
@@ -117,10 +122,14 @@ static uint8_t pending_func_delete_count = 0;
 struct pending_bypass_jk_key {
     uint32_t keycode;
     bool released;
+    int64_t pressed_at;
 };
 
 static struct pending_bypass_jk_key pending_bypass_jk_keys[MAX_PENDING_BYPASS_JK_KEYS];
 static uint8_t pending_bypass_jk_keys_len = 0;
+static struct k_work_delayable dual_space_timeout_work;
+void ng_type(NGList *keys);
+static bool nginput_remove_at(int idx);
 
 // EEPROMに保存する設定
 typedef union {
@@ -419,7 +428,7 @@ static naginata_kanamap ngdickana[] = {
 
     {.shift = NONE    , .douji = B_T            , .kana = {NONE, NONE, NONE, NONE, NONE, NONE   }, .func = nofunc}, //
     {.shift = NONE    , .douji = B_Y            , .kana = {NONE, NONE, NONE, NONE, NONE, NONE   }, .func = nofunc}, //
-    {.shift = B_SPACE , .douji = B_T            , .kana = {NONE, NONE, NONE, NONE, NONE, NONE   }, .func = ng_ST}, //
+    {.shift = B_SPACE , .douji = B_T            , .kana = {NONE, NONE, NONE, NONE, NONE, NONE   }, .func = nofunc}, // disable shifted-T (was ng_ST: Shift+Left)
     // {.shift = NONE, .douji = B_F | B_G, .kana = {NONE, NONE, NONE, NONE, NONE, NONE}, .func = naginata_off}, // 　かなオフ
 
     // 編集モード
@@ -584,6 +593,41 @@ static bool nglist_contains_dual_shift_keys(const NGList *keys) {
     return nglist_contains_key(keys, SPACE) && nglist_contains_key(keys, ENTER);
 }
 
+static int64_t now_ms(void) { return k_uptime_get(); }
+
+static bool nginput_has_lone_shift_front(uint32_t *keycode_out, int64_t *age_out, int64_t now) {
+    if (nginput.size != 1 || nginput.elements[0].size != 1) {
+        return false;
+    }
+
+    uint32_t keycode = nginput.elements[0].elements[0];
+    if (!is_shift_keycode(keycode)) {
+        return false;
+    }
+
+    if (keycode_out != NULL) {
+        *keycode_out = keycode;
+    }
+    if (age_out != NULL) {
+        *age_out = now - nginput_updated_at[0];
+    }
+    return true;
+}
+
+static bool can_pair_lone_shift_with(uint32_t keycode, int64_t now) {
+    if (!is_shift_keycode(keycode)) {
+        return false;
+    }
+    uint32_t pending_keycode = NONE;
+    int64_t age = 0;
+    if (!nginput_has_lone_shift_front(&pending_keycode, &age, now)) {
+        return false;
+    }
+    return pending_keycode != keycode && age >= 0 && age <= dual_space_window_ms;
+}
+
+static void schedule_dual_space_timeout_if_needed(void);
+
 static void clear_kana_output_history(void) {
     kana_delete_history_size = 0;
     kana_backspace_armed = false;
@@ -657,9 +701,16 @@ static void clear_bypass_mode_state(void) {
     forced_bypass_from_ng_off_lock = false;
     pending_bypass_jk_keys_len = 0;
     consumed_jk_combo_release_keys = 0ULL;
+    suppress_single_enter_tap = false;
+    k_work_cancel_delayable(&dual_space_timeout_work);
+    schedule_dual_space_timeout_if_needed();
 }
 
 static bool is_alpha_keycode(uint32_t keycode) { return keycode >= A && keycode <= Z; }
+
+static bool ng_off_lock_bypass_active(void) {
+    return forced_bypass_from_ng_off_lock || alpha_backspace_bypass_latched;
+}
 
 static bool is_navigation_or_tab_keycode(uint32_t keycode) {
     return keycode == TAB || keycode == LEFT || keycode == RIGHT || keycode == UP ||
@@ -668,6 +719,16 @@ static bool is_navigation_or_tab_keycode(uint32_t keycode) {
 
 static bool is_symbol_keycode(uint32_t keycode) {
     return keycode == DOT || keycode == COMMA || keycode == SLASH || keycode == SEMI;
+}
+
+static bool mods_bypass_active_now(void) {
+    zmk_mod_flags_t explicit_mods = zmk_hid_get_explicit_mods();
+    zmk_mod_flags_t active_mods = zmk_hid_get_keyboard_report()->body.modifiers;
+    bool shift_mods_active = (active_mods & (MOD_LSFT | MOD_RSFT)) != 0;
+    if (forced_bypass_from_ng_off_lock && !shift_mods_active) {
+        return explicit_mods || shift_mods_active;
+    }
+    return explicit_mods || shift_mods_active || forced_bypass_from_ng_off_lock;
 }
 
 static bool is_latched_bypass_keycode(uint32_t keycode) {
@@ -729,31 +790,118 @@ static bool append_pending_bypass_jk_key(uint32_t keycode) {
     int idx = pending_bypass_jk_index(keycode);
     if (idx >= 0) {
         pending_bypass_jk_keys[idx].released = false;
+        pending_bypass_jk_keys[idx].pressed_at = now_ms();
         return true;
     }
     if (pending_bypass_jk_keys_len >= MAX_PENDING_BYPASS_JK_KEYS) {
         return false;
     }
     pending_bypass_jk_keys[pending_bypass_jk_keys_len++] =
-        (struct pending_bypass_jk_key){.keycode = keycode, .released = false};
+        (struct pending_bypass_jk_key){.keycode = keycode,
+                                       .released = false,
+                                       .pressed_at = now_ms()};
     return true;
 }
 
 static void tap_keycode(uint32_t keycode) {
+    naginata_emitting_keycode_event = true;
     raise_zmk_keycode_state_changed_from_encoded(keycode, true, timestamp);
+    naginata_emitting_keycode_event = false;
+    naginata_emitting_keycode_event = true;
     raise_zmk_keycode_state_changed_from_encoded(keycode, false, timestamp);
+    naginata_emitting_keycode_event = false;
 }
 
 static void flush_released_pending_bypass_jk_keys(void) {
+    int64_t now = now_ms();
+    bool mods_bypass_active = mods_bypass_active_now();
     while (pending_bypass_jk_keys_len > 0 && pending_bypass_jk_keys[0].released) {
+        uint32_t pending_keycode = pending_bypass_jk_keys[0].keycode;
+        if (is_shift_keycode(pending_keycode)) {
+            uint32_t opposite = pending_keycode == SPACE ? ENTER : SPACE;
+            bool has_opposite = pending_bypass_jk_index(opposite) >= 0;
+            if (!has_opposite) {
+                if (mods_bypass_active) {
+                    // In modifier-bypass mode, NG_SPACE_R (ENTER) should emit immediately
+                    // on release, not be deferred until a later key event.
+                    if (pending_keycode != ENTER) {
+                        break;
+                    }
+                } else {
+                    int64_t age = now - pending_bypass_jk_keys[0].pressed_at;
+                    if (age >= 0 && age < dual_space_window_ms) {
+                        break;
+                    }
+                }
+            }
+        }
+
         uint32_t keycode = pending_bypass_jk_keys[0].keycode;
-        // 薙刀レイヤーのENTERキーは右スペースとして扱うため、
-        // バイパス単押しのフォールバックもSPACEを送る。
-        if (keycode == ENTER) {
-            keycode = SPACE;
+        if (keycode == ENTER && alpha_backspace_bypass_latched && !mods_bypass_active) {
+            alpha_backspace_bypass_latched = false;
         }
         tap_keycode(keycode);
+        if (keycode == ENTER) {
+            ng_post_enter_maybe_move_right();
+        }
         remove_pending_bypass_jk_index(0);
+    }
+    schedule_dual_space_timeout_if_needed();
+}
+
+static void dual_space_timeout_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    timestamp = now_ms();
+
+    if (pending_bypass_jk_keys_len > 0) {
+        flush_released_pending_bypass_jk_keys();
+    }
+
+    if (pressed_keys == 0UL && nginput.size > 0) {
+        int64_t age = 0;
+        if (nginput_has_lone_shift_front(NULL, &age, timestamp) && age >= dual_space_window_ms) {
+            LOG_DBG("NAG timeout flush lone shift age=%lld window=%u", age, dual_space_window_ms);
+            ng_type(&(nginput.elements[0]));
+            nginput_remove_at(0);
+        }
+    }
+
+    schedule_dual_space_timeout_if_needed();
+}
+
+static void schedule_dual_space_timeout_if_needed(void) {
+    int64_t now = now_ms();
+    int64_t min_remaining = -1;
+    bool mods_bypass_active = mods_bypass_active_now();
+
+    int64_t ng_age = 0;
+    if (pressed_keys == 0UL && nginput_has_lone_shift_front(NULL, &ng_age, now) &&
+        ng_age >= 0 && ng_age < dual_space_window_ms) {
+        min_remaining = dual_space_window_ms - ng_age;
+    }
+
+    if (pending_bypass_jk_keys_len > 0 && pending_bypass_jk_keys[0].released) {
+        uint32_t pending = pending_bypass_jk_keys[0].keycode;
+        if (is_shift_keycode(pending)) {
+            uint32_t opposite = pending == SPACE ? ENTER : SPACE;
+            bool has_opposite = pending_bypass_jk_index(opposite) >= 0;
+            if (!has_opposite && !mods_bypass_active) {
+                int64_t age = now - pending_bypass_jk_keys[0].pressed_at;
+                if (age >= 0 && age < dual_space_window_ms) {
+                    int64_t remaining = dual_space_window_ms - age;
+                    if (min_remaining < 0 || remaining < min_remaining) {
+                        min_remaining = remaining;
+                    }
+                }
+            }
+        }
+    }
+
+    if (min_remaining >= 0) {
+        k_work_reschedule(&dual_space_timeout_work, K_MSEC((int32_t)min_remaining));
+    } else {
+        k_work_cancel_delayable(&dual_space_timeout_work);
     }
 }
 
@@ -883,6 +1031,15 @@ static bool within_late_shift_window(int idx) {
     return age >= 0 && age <= late_shift_window_ms;
 }
 
+static bool within_dual_space_window(int idx) {
+    if (idx < 0 || idx >= nginput.size) {
+        return false;
+    }
+
+    int64_t age = timestamp - nginput_updated_at[idx];
+    return age >= 0 && age <= dual_space_window_ms;
+}
+
 static bool has_shift_match(const NGList *keys) {
     if (keys->size == 0 || keys->size >= 3) {
         return false;
@@ -928,6 +1085,11 @@ static bool should_preconfirm_before_function(uint32_t shift, uint32_t douji) {
     }
 }
 
+static void clear_ng_off_lock_bypass_flags(void) {
+    forced_bypass_from_ng_off_lock = false;
+    alpha_backspace_bypass_latched = false;
+}
+
 static void add_shift_key_to_input(uint32_t keycode) {
     bool shift_key = is_shift_keycode(keycode);
     bool combined = false;
@@ -941,8 +1103,13 @@ static void add_shift_key_to_input(uint32_t keycode) {
             allow_combine = true;
         }
 
-        if (last.size > 0 && last.size < 3 && allow_combine &&
-            within_late_shift_window(nginput.size - 1)) {
+        bool dual_shift_pair =
+            shift_key && last.size == 1 && is_shift_keycode(last.elements[0]) &&
+            last.elements[0] != keycode;
+        bool within_window = dual_shift_pair ? within_dual_space_window(nginput.size - 1)
+                                             : within_late_shift_window(nginput.size - 1);
+
+        if (last.size > 0 && last.size < 3 && allow_combine && within_window) {
             NGList shifted;
             initializeList(&shifted);
             addToList(&shifted, keycode);
@@ -953,6 +1120,7 @@ static void add_shift_key_to_input(uint32_t keycode) {
                 nginput_remove_at(nginput.size - 1);
                 nginput_add(&shifted);
                 combined = true;
+                LOG_DBG("NAG shift combined key=0x%02X size=%d", keycode, shifted.size);
             }
         }
     }
@@ -962,6 +1130,9 @@ static void add_shift_key_to_input(uint32_t keycode) {
         initializeList(&a);
         addToList(&a, keycode);
         nginput_add(&a);
+        if (is_shift_keycode(keycode)) {
+            LOG_DBG("NAG shift queued key=0x%02X (late or no match)", keycode);
+        }
     }
 }
 
@@ -1008,13 +1179,21 @@ static naginata_backspace_action_t resolve_naginata_backspace_action(void) {
 static void emit_naginata_backspace_action(const naginata_backspace_action_t *action) {
     for (int i = 0; i < action->backspace_count; i++) {
         LOG_DBG(" NAGINATA type keycode 0x%02X", BACKSPACE);
+        naginata_emitting_keycode_event = true;
         raise_zmk_keycode_state_changed_from_encoded(BACKSPACE, true, timestamp);
+        naginata_emitting_keycode_event = false;
+        naginata_emitting_keycode_event = true;
         raise_zmk_keycode_state_changed_from_encoded(BACKSPACE, false, timestamp);
+        naginata_emitting_keycode_event = false;
     }
     for (int i = 0; i < action->delete_count; i++) {
         LOG_DBG(" NAGINATA type keycode 0x%02X", DELETE);
+        naginata_emitting_keycode_event = true;
         raise_zmk_keycode_state_changed_from_encoded(DELETE, true, timestamp);
+        naginata_emitting_keycode_event = false;
+        naginata_emitting_keycode_event = true;
         raise_zmk_keycode_state_changed_from_encoded(DELETE, false, timestamp);
+        naginata_emitting_keycode_event = false;
     }
 }
 
@@ -1024,7 +1203,9 @@ static void press_backspace_for_repeat(void) {
         bypass_keys |= bit;
     }
     LOG_DBG(" NAGINATA type keycode 0x%02X", BACKSPACE);
+    naginata_emitting_keycode_event = true;
     raise_zmk_keycode_state_changed_from_encoded(BACKSPACE, true, timestamp);
+    naginata_emitting_keycode_event = false;
 }
 
 // キー入力を文字に変換して出力する
@@ -1041,19 +1222,42 @@ void ng_type(NGList *keys) {
         kuten_confirm_extra_backspace_pending = false;
     }
 
+    if (nglist_contains_key(keys, ENTER) && !(keys->size == 1 && keys->elements[0] == ENTER)) {
+        suppress_single_enter_tap = false;
+    }
+
     if (keys->size == 2 && nglist_contains_dual_shift_keys(keys)) {
+        suppress_single_enter_tap = false;
+        LOG_DBG("NAG ENTER reason=dual_shift");
         LOG_DBG(" NAGINATA type keycode 0x%02X", ENTER);
+        naginata_emitting_keycode_event = true;
         raise_zmk_keycode_state_changed_from_encoded(ENTER, true, timestamp);
+        naginata_emitting_keycode_event = false;
+        naginata_emitting_keycode_event = true;
         raise_zmk_keycode_state_changed_from_encoded(ENTER, false, timestamp);
-        ng_post_enter_maybe_move_right();
+        naginata_emitting_keycode_event = false;
+        // SPACE+ENTER (dual shift) should not trigger bracket-exit move.
+        clear_ng_off_lock_bypass_flags();
         clear_kana_output_history();
         return;
     }
 
     if (keys->size == 1 && keys->elements[0] == ENTER) {
-        LOG_DBG(" NAGINATA type keycode 0x%02X", SPACE);
-        raise_zmk_keycode_state_changed_from_encoded(SPACE, true, timestamp);
-        raise_zmk_keycode_state_changed_from_encoded(SPACE, false, timestamp);
+        if (suppress_single_enter_tap) {
+            LOG_DBG("NAG single ENTER suppressed as pure shift");
+            suppress_single_enter_tap = false;
+            clear_kana_output_history();
+            return;
+        }
+        LOG_DBG("NAG single ENTER fallback");
+        LOG_DBG(" NAGINATA type keycode 0x%02X", ENTER);
+        naginata_emitting_keycode_event = true;
+        raise_zmk_keycode_state_changed_from_encoded(ENTER, true, timestamp);
+        naginata_emitting_keycode_event = false;
+        naginata_emitting_keycode_event = true;
+        raise_zmk_keycode_state_changed_from_encoded(ENTER, false, timestamp);
+        naginata_emitting_keycode_event = false;
+        ng_post_enter_maybe_move_right();
         clear_kana_output_history();
         return;
     }
@@ -1086,16 +1290,24 @@ void ng_type(NGList *keys) {
                         }
                         if (kuten_confirm_mode == KUTEN_CONFIRM_SPACE) {
                             LOG_DBG(" NAGINATA type keycode 0x%02X", SPACE);
+                            naginata_emitting_keycode_event = true;
                             raise_zmk_keycode_state_changed_from_encoded(SPACE, true, timestamp);
+                            naginata_emitting_keycode_event = false;
+                            naginata_emitting_keycode_event = true;
                             raise_zmk_keycode_state_changed_from_encoded(SPACE, false, timestamp);
+                            naginata_emitting_keycode_event = false;
                             continue;
                         }
                     }
                     LOG_DBG(" NAGINATA type keycode 0x%02X", ngdickana[i].kana[k]);
+                    naginata_emitting_keycode_event = true;
                     raise_zmk_keycode_state_changed_from_encoded(ngdickana[i].kana[k], true,
                                                                  timestamp);
+                    naginata_emitting_keycode_event = false;
+                    naginata_emitting_keycode_event = true;
                     raise_zmk_keycode_state_changed_from_encoded(ngdickana[i].kana[k], false,
                                                                  timestamp);
+                    naginata_emitting_keycode_event = false;
                 }
                 push_kana_output_len(out_len);
                 ime_preedit_pending = kana_output_contains_alpha(ngdickana[i].kana);
@@ -1108,8 +1320,13 @@ void ng_type(NGList *keys) {
                     should_preconfirm_before_function(ngdickana[i].shift, ngdickana[i].douji)) {
                     // 「」系以外の編集系機能を実行する前に、先行する未確定入力を確定。
                     LOG_DBG(" NAGINATA pre-confirm pending input");
+                    LOG_DBG("NAG ENTER reason=preconfirm_before_function");
+                    naginata_emitting_keycode_event = true;
                     raise_zmk_keycode_state_changed_from_encoded(ENTER, true, timestamp);
+                    naginata_emitting_keycode_event = false;
+                    naginata_emitting_keycode_event = true;
                     raise_zmk_keycode_state_changed_from_encoded(ENTER, false, timestamp);
+                    naginata_emitting_keycode_event = false;
                     ime_preedit_pending = false;
                 }
                 ngdickana[i].func();
@@ -1164,8 +1381,10 @@ static bool emit_jk_function_combo(uint32_t function_keycode) {
 }
 
 static bool emit_space_enter_combo(bool clear_latched_bypass) {
+    LOG_DBG("NAG ENTER reason=bypass_space_enter_combo");
     tap_keycode(ENTER);
-    ng_post_enter_maybe_move_right();
+    // Bypass SPACE+ENTER should emit ENTER only (no bracket-exit move).
+    clear_ng_off_lock_bypass_flags();
     if (clear_latched_bypass) {
         alpha_backspace_bypass_latched = false;
     }
@@ -1178,12 +1397,6 @@ static bool emit_space_enter_combo(bool clear_latched_bypass) {
 static bool try_handle_bypass_jk_combo_press(uint32_t keycode, bool bypass_active,
                                              bool clear_latched_bypass_on_enter) {
     if (!bypass_active || !is_bypass_jk_combo_candidate_keycode(keycode)) {
-        return false;
-    }
-
-    // 修飾キーによるバイパス中は、右スペース(ENTER)を通常のEnterとして扱う。
-    // SPACE+ENTER同時押し判定は、ラッチ由来バイパス時のみ有効にする。
-    if ((keycode == SPACE || keycode == ENTER) && !clear_latched_bypass_on_enter) {
         return false;
     }
 
@@ -1241,6 +1454,21 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
         if (keycode != BACKSPACE) {
             kuten_confirm_extra_backspace_pending = false;
         }
+
+        if (pending_bypass_jk_keys_len > 0 && pending_bypass_jk_keys[0].released) {
+            flush_released_pending_bypass_jk_keys();
+        }
+
+        if (pressed_keys == 0UL) {
+            int64_t now = timestamp;
+            if (nginput_has_lone_shift_front(NULL, NULL, now) &&
+                !can_pair_lone_shift_with(keycode, now)) {
+                ng_type(&(nginput.elements[0]));
+                nginput_remove_at(0);
+            }
+        }
+        schedule_dual_space_timeout_if_needed();
+
         zmk_mod_flags_t explicit_mods = zmk_hid_get_explicit_mods();
         zmk_mod_flags_t active_mods = zmk_hid_get_keyboard_report()->body.modifiers;
         bool shift_mods_active = (active_mods & (MOD_LSFT | MOD_RSFT)) != 0;
@@ -1248,27 +1476,37 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
             // Fail-safe: ng_off_lock release取りこぼし時の強制バイパス残留を防ぐ
             forced_bypass_from_ng_off_lock = false;
         }
-        bool mods_bypass_active =
-            explicit_mods || shift_mods_active || forced_bypass_from_ng_off_lock;
+        bool modifier_bypass_active = explicit_mods || shift_mods_active;
         bool is_latched_bypass_key = is_latched_bypass_keycode(keycode);
         bool is_passthrough_only_key = is_navigation_or_tab_keycode(keycode);
+
+        if (keycode == ENTER) {
+            bool prev_key_was_alpha = is_alpha_keycode(last_naginata_pressed_keycode);
+            suppress_single_enter_tap =
+                prev_key_was_alpha && !ng_off_lock_bypass_active() && explicit_mods == 0;
+        }
+        last_naginata_pressed_keycode = keycode;
 
         if (alpha_backspace_bypass_latched && !is_latched_bypass_key) {
             alpha_backspace_bypass_latched = false;
             pending_bypass_jk_keys_len = 0;
             consumed_jk_combo_release_keys = 0ULL;
+            schedule_dual_space_timeout_if_needed();
         }
 
+        bool mods_bypass_active_for_key =
+            (modifier_bypass_active && keycode != ENTER) || forced_bypass_from_ng_off_lock;
         bool bypass_active_for_key =
-            mods_bypass_active || (alpha_backspace_bypass_latched && is_latched_bypass_key);
+            mods_bypass_active_for_key || (alpha_backspace_bypass_latched && is_latched_bypass_key);
         bool clear_latched_bypass_on_enter =
-            alpha_backspace_bypass_latched && !mods_bypass_active;
+            alpha_backspace_bypass_latched && !mods_bypass_active_for_key;
         if (try_handle_bypass_jk_combo_press(keycode, bypass_active_for_key,
                                              clear_latched_bypass_on_enter)) {
             return true;
         }
 
-        if (mods_bypass_active || (alpha_backspace_bypass_latched && is_latched_bypass_key)) {
+        if (mods_bypass_active_for_key ||
+            (alpha_backspace_bypass_latched && is_latched_bypass_key)) {
             uint64_t bit = bypass_bit(keycode);
             if (bit) {
                 bypass_keys |= bit;
@@ -1278,7 +1516,9 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
                 alpha_backspace_bypass_latched = true;
             }
             clear_kana_output_history();
+            naginata_emitting_keycode_event = true;
             raise_zmk_keycode_state_changed_from_encoded(keycode, true, timestamp);
+            naginata_emitting_keycode_event = false;
             return true;
         }
         if (keycode == BACKSPACE) {
@@ -1300,7 +1540,9 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
                 bypass_keys |= bit;
             }
             clear_kana_output_history();
+            naginata_emitting_keycode_event = true;
             raise_zmk_keycode_state_changed_from_encoded(keycode, true, timestamp);
+            naginata_emitting_keycode_event = false;
             return true;
         }
         if (keycode == SPACE || keycode == ENTER) {
@@ -1358,6 +1600,13 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
                 addToList(&rskc, rs[i][1]);
             }
 
+            // Prevent synthesizing SPACE+ENTER from a single shift key press.
+            // Dual-shift pairing is handled explicitly by add_shift_key_to_input().
+            if (rs[i][1] == 0 && is_shift_keycode(rs[i][0]) && is_shift_keycode(keycode) &&
+                rs[i][0] != keycode) {
+                continue;
+            }
+
             int c = includeList(&rskc, keycode);
             uint32_t brs = 0UL;
             for (int j = 0; j < rskc.size; j++) {
@@ -1384,6 +1633,8 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
 
         if (!defer_for_space_shift &&
             (nginput.size > 1 || number_of_candidates(&(nginput.elements[0])) == 1)) {
+            LOG_DBG("NAG press flush front size=%d first=0x%02X", nginput.size,
+                    nginput.elements[0].elements[0]);
             ng_type(&(nginput.elements[0]));
             nginput_remove_at(0);
         }
@@ -1434,7 +1685,9 @@ bool naginata_release(struct zmk_behavior_binding *binding,
             uint64_t bit = bypass_bit(keycode);
             if (bit && (bypass_keys & bit)) {
                 bypass_keys &= ~bit;
+                naginata_emitting_keycode_event = true;
                 raise_zmk_keycode_state_changed_from_encoded(keycode, false, timestamp);
+                naginata_emitting_keycode_event = false;
                 return true;
             }
         }
@@ -1450,6 +1703,17 @@ bool naginata_release(struct zmk_behavior_binding *binding,
         }
 
         if (pressed_keys == 0UL) {
+            int64_t age = 0;
+            if (nginput_has_lone_shift_front(NULL, &age, timestamp) &&
+                age >= 0 && age < dual_space_window_ms) {
+                LOG_DBG("NAG release defer lone shift age=%lld window=%u", age,
+                        dual_space_window_ms);
+                schedule_dual_space_timeout_if_needed();
+                break;
+            }
+            if (nginput.size > 0) {
+                LOG_DBG("NAG release flush all size=%d", nginput.size);
+            }
             while (nginput.size > 0) {
                 ng_type(&(nginput.elements[0]));
                 nginput_remove_at(0);
@@ -1460,6 +1724,7 @@ bool naginata_release(struct zmk_behavior_binding *binding,
                 nginput_remove_at(0);
             }
         }
+        schedule_dual_space_timeout_if_needed();
         break;
     }
 
@@ -1480,9 +1745,13 @@ static int behavior_naginata_init(const struct device *dev) {
     reset_pressed_keys_state();
     n_pressed_keys = 0;
     bypass_keys = 0ULL;
+    last_naginata_pressed_keycode = NONE;
+    suppress_single_enter_tap = false;
+    k_work_init_delayable(&dual_space_timeout_work, dual_space_timeout_work_handler);
     clear_bypass_mode_state();
     naginata_config.os =  NG_WINDOWS;
     late_shift_window_ms = cfg->late_shift_window_ms;
+    dual_space_window_ms = cfg->dual_space_window_ms;
     switch (cfg->kuten_confirm_enter) {
     case KUTEN_CONFIRM_DISABLED:
     case KUTEN_CONFIRM_ENTER:
@@ -1538,6 +1807,10 @@ static int on_keymap_binding_released(struct zmk_behavior_binding *binding,
 
 static int naginata_bypass_reset_listener(const zmk_event_t *eh) {
     const struct zmk_keycode_state_changed *ev = as_zmk_keycode_state_changed(eh);
+    if (ev != NULL && ev->state && !naginata_emitting_keycode_event) {
+        last_naginata_pressed_keycode = NONE;
+        suppress_single_enter_tap = false;
+    }
     if (should_clear_kuten_confirm_pending_on_keycode_event(ev)) {
         kuten_confirm_extra_backspace_pending = false;
     }
@@ -1556,6 +1829,7 @@ static const struct behavior_driver_api behavior_naginata_driver_api = {
 #define KP_INST(n)                                                                                 \
     static const struct behavior_naginata_config behavior_naginata_config_##n = {                  \
         .late_shift_window_ms = DT_INST_PROP(n, late_shift_window_ms),                             \
+        .dual_space_window_ms = DT_INST_PROP(n, dual_space_window_ms),                             \
         .kuten_confirm_enter = DT_INST_PROP(n, kuten_confirm_enter),                               \
     };                                                                                              \
     BEHAVIOR_DT_INST_DEFINE(n, behavior_naginata_init, NULL, NULL,                                 \

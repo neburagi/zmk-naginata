@@ -35,6 +35,7 @@ struct behavior_ng_off_shift_data {
     const struct device *dev;
     bool active;
     bool shift_pressed;
+    bool arm_bypass_latch;
     bool caps_word_expected_active;
     bool saw_other_key_press;
     uint8_t active_other_keys_down;
@@ -104,6 +105,8 @@ static int on_ng_off_shift_pressed(struct zmk_behavior_binding *binding,
 
     data->active = true;
     data->shift_pressed = false;
+    // Default: single tap/alpha-only hold should keep bypass latch enabled.
+    data->arm_bypass_latch = true;
     data->saw_other_key_press = false;
     data->active_other_keys_down = 0;
     data->position = event.position;
@@ -138,7 +141,9 @@ static int on_ng_off_shift_released(struct zmk_behavior_binding *binding,
         data->shift_pressed = false;
     }
     ng_set_forced_bypass(0);
-    ng_arm_bypass_latch();
+    if (data->arm_bypass_latch) {
+        ng_arm_bypass_latch();
+    }
 
     // tap: no other key press while held -> toggle ON/OFF
     if (!data->saw_other_key_press && data->active_other_keys_down == 0) {
@@ -156,6 +161,7 @@ static int on_ng_off_shift_released(struct zmk_behavior_binding *binding,
     }
 
     data->active = false;
+    data->arm_bypass_latch = false;
     return ZMK_BEHAVIOR_OPAQUE;
 }
 
@@ -176,6 +182,7 @@ static int ng_off_shift_keycode_state_changed_listener(const zmk_event_t *eh);
 static int behavior_ng_off_shift_init(const struct device *dev) {
     struct behavior_ng_off_shift_data *data = dev->data;
     data->dev = dev;
+    data->arm_bypass_latch = false;
     data->caps_word_expected_active = false;
     data->saw_other_key_press = false;
     data->active_other_keys_down = 0;
@@ -224,6 +231,16 @@ static int ng_off_shift_keycode_state_changed_listener(const zmk_event_t *eh) {
 
     for (int i = 0; i < ARRAY_SIZE(devs); i++) {
         struct behavior_ng_off_shift_data *data = devs[i]->data;
+        if (data->active && ev->usage_page == HID_USAGE_KEY) {
+            bool is_alpha = caps_word_is_alpha_usage(ev->keycode);
+            bool is_own_shift = ev->keycode == ZMK_HID_USAGE_ID(LSHIFT) ||
+                                ev->keycode == ZMK_HID_USAGE_ID(RSHIFT);
+            if (!is_alpha && !is_own_shift) {
+                // If any non-letter key is pressed while held, do not latch bypass mode.
+                data->arm_bypass_latch = false;
+            }
+        }
+
         if (!data->caps_word_expected_active) {
             continue;
         }
