@@ -435,7 +435,7 @@ static naginata_kanamap ngdickana[] = {
     {.shift = B_J|B_K    , .douji = B_Q     , .kana = {NONE, NONE, NONE, NONE, NONE, NONE} , .func = ngh_JKQ    }, // ^{End}
     {.shift = B_J|B_K    , .douji = B_W     , .kana = {NONE, NONE, NONE, NONE, NONE, NONE} , .func = ngh_JKW    }, // ／{改行}
     {.shift = B_J|B_K    , .douji = B_E     , .kana = {NONE, NONE, NONE, NONE, NONE, NONE} , .func = ngh_JKE    }, // /*ディ*/
-    {.shift = B_J|B_K    , .douji = B_R     , .kana = {NONE, NONE, NONE, NONE, NONE, NONE} , .func = ngh_JKR    }, // ^s
+    {.shift = B_J|B_K    , .douji = B_R     , .kana = {NONE, NONE, NONE, NONE, NONE, NONE} , .func = nofunc     }, // disabled: practice only (was ^s)
     {.shift = B_J|B_K    , .douji = B_T     , .kana = {NONE, NONE, NONE, NONE, NONE, NONE} , .func = ngh_JKT    }, // ・
     {.shift = B_J|B_K    , .douji = B_A     , .kana = {NONE, NONE, NONE, NONE, NONE, NONE} , .func = ngh_JKA    }, // ……{改行}
     {.shift = B_J|B_K    , .douji = B_S     , .kana = {NONE, NONE, NONE, NONE, NONE, NONE} , .func = ngh_JKS    }, // 『{改行}
@@ -1227,6 +1227,7 @@ void ng_type(NGList *keys) {
     }
 
     if (keys->size == 2 && nglist_contains_dual_shift_keys(keys)) {
+        bool suppress_bracket_exit = alpha_backspace_bypass_latched;
         suppress_single_enter_tap = false;
         LOG_DBG("NAG ENTER reason=dual_shift");
         LOG_DBG(" NAGINATA type keycode 0x%02X", ENTER);
@@ -1236,7 +1237,9 @@ void ng_type(NGList *keys) {
         naginata_emitting_keycode_event = true;
         raise_zmk_keycode_state_changed_from_encoded(ENTER, false, timestamp);
         naginata_emitting_keycode_event = false;
-        // SPACE+ENTER (dual shift) should not trigger bracket-exit move.
+        if (!suppress_bracket_exit) {
+            ng_post_enter_maybe_move_right();
+        }
         clear_ng_off_lock_bypass_flags();
         clear_kana_output_history();
         return;
@@ -1398,6 +1401,16 @@ static bool try_handle_bypass_jk_combo_press(uint32_t keycode, bool bypass_activ
                                              bool clear_latched_bypass_on_enter) {
     if (!bypass_active || !is_bypass_jk_combo_candidate_keycode(keycode)) {
         return false;
+    }
+
+    bool is_jk_function_key = is_jk_function_combo_keycode(keycode);
+    if (is_jk_function_key) {
+        bool has_j = pending_bypass_jk_index(J) >= 0;
+        bool has_k = pending_bypass_jk_index(K) >= 0;
+        if (!has_j || !has_k) {
+            // Avoid swallowing plain roll input (e.g. E->R) when J/K combo shift is not active.
+            return false;
+        }
     }
 
     if (!append_pending_bypass_jk_key(keycode)) {
