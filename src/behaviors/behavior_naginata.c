@@ -115,6 +115,7 @@ static uint8_t pending_func_delete_count = 0;
 #define NG_MACOS 1
 #define NG_LINUX 2
 #define NG_IOS 3
+#define NG_ANDROID 4
 #define KUTEN_CONFIRM_DISABLED 0U
 #define KUTEN_CONFIRM_ENTER 1U
 #define KUTEN_CONFIRM_SPACE 2U
@@ -134,8 +135,7 @@ static bool nginput_remove_at(int idx);
 
 // EEPROMに保存する設定
 typedef union {
-    uint8_t os : 2;  // 2 bits can store values 0-3 (NG_WINDOWS, NG_MACOS, NG_LINUX, NG_IOS)
-    bool tategaki : true; // true: 縦書き, false: 横書き
+    uint8_t os : 3;  // 3 bits can store values 0-4 (NG_WINDOWS, NG_MACOS, NG_LINUX, NG_IOS, NG_ANDROID)
 } user_config_t;
 
 static uint64_t bypass_bit(uint32_t keycode) {
@@ -1808,10 +1808,7 @@ static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
             naginata_config.os = NG_LINUX;
             return ZMK_BEHAVIOR_OPAQUE;
         case F18:
-            naginata_config.tategaki = true;
-            return ZMK_BEHAVIOR_OPAQUE;
-        case F19:
-            naginata_config.tategaki = false;
+            naginata_config.os = NG_ANDROID;
             return ZMK_BEHAVIOR_OPAQUE;
     }
 
