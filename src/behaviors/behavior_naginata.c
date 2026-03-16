@@ -107,6 +107,7 @@ static kana_delete_action_t kana_delete_history[KANA_BACKSPACE_HISTORY_SIZE];
 static uint8_t kana_delete_history_size = 0;
 static bool kana_backspace_armed = false;
 static bool kana_backspace_needs_space_undo = false;
+static bool kana_history_reset_on_next_non_backspace = false;
 static uint8_t pending_func_backspace_count = 0;
 static uint8_t pending_func_delete_count = 0;
 
@@ -632,6 +633,7 @@ static void clear_kana_output_history(void) {
     kana_delete_history_size = 0;
     kana_backspace_armed = false;
     kana_backspace_needs_space_undo = false;
+    kana_history_reset_on_next_non_backspace = false;
     ime_preedit_pending = false;
     kuten_confirm_extra_backspace_pending = false;
 }
@@ -639,14 +641,17 @@ static void clear_kana_output_history(void) {
 static void disarm_kana_backspace_history(void) {
     kana_backspace_armed = false;
     kana_backspace_needs_space_undo = false;
+    kana_history_reset_on_next_non_backspace = false;
 }
 
 static void preserve_history_for_space_undo(void) {
     if (kana_delete_history_size == 0) {
+        kana_history_reset_on_next_non_backspace = false;
         return;
     }
     kana_backspace_armed = false;
     kana_backspace_needs_space_undo = true;
+    kana_history_reset_on_next_non_backspace = true;
 }
 
 static void push_kana_delete_action(uint8_t backspace_count, uint8_t delete_count) {
@@ -1173,6 +1178,9 @@ static naginata_backspace_action_t resolve_naginata_backspace_action(void) {
         kuten_confirm_extra_backspace_pending = false;
     }
 
+    // 「Space/Enterで変換確定後、次キーで履歴破棄」の予約はBS処理時点で消費する。
+    kana_history_reset_on_next_non_backspace = false;
+
     return action;
 }
 
@@ -1565,7 +1573,12 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
                 disarm_kana_backspace_history();
             }
         } else if (keycode != BACKSPACE) {
-            disarm_kana_backspace_history();
+            // Space/Enterで変換を跨いだ直後の通常入力は、古い履歴を完全に破棄する。
+            if (kana_history_reset_on_next_non_backspace) {
+                clear_kana_output_history();
+            } else {
+                disarm_kana_backspace_history();
+            }
         }
         n_pressed_keys++;
         pressed_keys_add(keycode); // キーの重ね合わせ
