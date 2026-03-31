@@ -21,6 +21,10 @@
 #include <zmk_naginata/nglistarray.h>
 #include <zmk_naginata/naginata_func.h>
 
+#if IS_ENABLED(CONFIG_ZMK_POINTING)
+#include <zmk/pointing/mouse_speed.h>
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 extern int64_t timestamp;
 
@@ -733,7 +737,9 @@ static bool mods_bypass_active_now(void) {
     if (forced_bypass_from_ng_off_lock && !shift_mods_active) {
         return explicit_mods || shift_mods_active;
     }
-    return explicit_mods || shift_mods_active || forced_bypass_from_ng_off_lock;
+    bool ng_space_held = (pressed_keys & B_SPACE) != 0;
+    bool forced_bypass_effective = forced_bypass_from_ng_off_lock && !ng_space_held;
+    return explicit_mods || shift_mods_active || forced_bypass_effective;
 }
 
 static bool is_latched_bypass_keycode(uint32_t keycode) {
@@ -1515,8 +1521,16 @@ bool naginata_press(struct zmk_behavior_binding *binding, struct zmk_behavior_bi
             schedule_dual_space_timeout_if_needed();
         }
 
+        // ng_off_lock中でもNG_SPACEシフトキー自体とNG_SPACEが押されている
+        // 状態のキーは薙刀式に通す（「、」「。」等のシフト面を打てるようにする）
+        bool ng_space_held = (pressed_keys & B_SPACE) != 0;
+        bool ng_off_lock_allows_naginata = forced_bypass_from_ng_off_lock &&
+                                           (is_shift_keycode(keycode) || ng_space_held);
         bool mods_bypass_active_for_key =
-            (modifier_bypass_active && keycode != ENTER) || forced_bypass_from_ng_off_lock;
+            ng_off_lock_allows_naginata
+                ? false
+                : ((modifier_bypass_active && keycode != ENTER) ||
+                   forced_bypass_from_ng_off_lock);
         bool bypass_active_for_key =
             mods_bypass_active_for_key || (alpha_backspace_bypass_latched && is_latched_bypass_key);
         bool clear_latched_bypass_on_enter =
@@ -1800,15 +1814,27 @@ static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
     switch (binding->param1) {
         case F15:
             naginata_config.os = NG_WINDOWS;
+#if IS_ENABLED(CONFIG_ZMK_POINTING)
+            zmk_pointing_mouse_speed_set_freq_mode(ZMK_POINTING_MOUSE_SPEED_TARGET_SCROLL, false, 1);
+#endif
             return ZMK_BEHAVIOR_OPAQUE;
         case F16:
             naginata_config.os = NG_MACOS;
+#if IS_ENABLED(CONFIG_ZMK_POINTING)
+            zmk_pointing_mouse_speed_set_freq_mode(ZMK_POINTING_MOUSE_SPEED_TARGET_SCROLL, false, 1);
+#endif
             return ZMK_BEHAVIOR_OPAQUE;
         case F17:
             naginata_config.os = NG_LINUX;
+#if IS_ENABLED(CONFIG_ZMK_POINTING)
+            zmk_pointing_mouse_speed_set_freq_mode(ZMK_POINTING_MOUSE_SPEED_TARGET_SCROLL, false, 1);
+#endif
             return ZMK_BEHAVIOR_OPAQUE;
         case F18:
             naginata_config.os = NG_ANDROID;
+#if IS_ENABLED(CONFIG_ZMK_POINTING)
+            zmk_pointing_mouse_speed_set_freq_mode(ZMK_POINTING_MOUSE_SPEED_TARGET_SCROLL, true, 10);
+#endif
             return ZMK_BEHAVIOR_OPAQUE;
     }
 
