@@ -299,7 +299,9 @@ static naginata_kanamap ngdickana[] = {
     {.shift = NONE    , .douji = B_C            , .kana = {R, O, NONE, NONE, NONE, NONE   }, .func = nofunc }, // ろ
     {.shift = B_SPACE , .douji = B_DOT          , .kana = {W, A, NONE, NONE, NONE, NONE   }, .func = nofunc }, // わ
     {.shift = B_SPACE , .douji = B_A            , .kana = {W, O, NONE, NONE, NONE, NONE   }, .func = nofunc }, // を
-　    {.shift = NONE    , .douji = B_COMMA        , .kana = {N, N, NONE, NONE, NONE, NONE   }, .func = nofunc }, // ん
+  {.shift = B_SPACE    , .douji = B_Z       , .kana = {N, N, NONE, NONE, NONE, NONE   }, .func = nofunc }, // ん
+  {.shift = B_SPACE    , .douji = B_X       , .kana = {N, N, NONE, NONE, NONE, NONE   }, .func = nofunc }, // ん
+  {.shift = NONE    , .douji = B_COMMA       , .kana = {N, N, NONE, NONE, NONE, NONE   }, .func = nofunc }, // ん
     {.shift = NONE    , .douji = B_SEMI         , .kana = {MINUS, NONE, NONE, NONE, NONE, NONE}, .func = nofunc }, // ー
 
     // 濁音
